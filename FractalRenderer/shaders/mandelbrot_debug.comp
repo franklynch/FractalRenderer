@@ -1,0 +1,240 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(push_constant) uniform constants {
+    vec4 data1; // center_x, center_y, zoom, max_iterations
+    vec4 data2; // color_offset, color_scale, bailout, palette_mode
+    vec4 data3; // antialiasing_samples, interior_style, orbit_trap_enabled, orbit_trap_radius
+    vec4 data4; // stripe_density, stripe_enabled, 0, 0
+} PushConstants;
+
+// ============================================
+// IMPROVED COLOR PALETTES
+// ============================================
+
+vec3 palette_cosine(float t) {
+    // Better balanced cosine palette
+    vec3 a = vec3(0.5, 0.5, 0.5);
+    vec3 b = vec3(0.5, 0.5, 0.5);
+    vec3 c = vec3(1.0, 1.0, 1.0);
+    vec3 d = vec3(0.00, 0.33, 0.67);  // Changed for better color distribution
+    return a + b * cos(6.28318 * (c * t + d));
+}
+
+vec3 palette_fire(float t) {
+    t = fract(t);
+    vec3 c1 = vec3(0.0, 0.0, 0.0);
+    vec3 c2 = vec3(0.3, 0.0, 0.1);
+    vec3 c3 = vec3(0.8, 0.1, 0.0);
+    vec3 c4 = vec3(1.0, 0.5, 0.0);
+    vec3 c5 = vec3(1.0, 1.0, 0.5);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 palette_ocean(float t) {
+    t = fract(t);
+    vec3 c1 = vec3(0.0, 0.05, 0.15);
+    vec3 c2 = vec3(0.0, 0.15, 0.4);
+    vec3 c3 = vec3(0.0, 0.4, 0.7);
+    vec3 c4 = vec3(0.2, 0.7, 0.9);
+    vec3 c5 = vec3(0.7, 0.95, 1.0);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 palette_grayscale(float t) {
+    float val = fract(t);
+    return vec3(val);
+}
+
+vec3 palette_rainbow(float t) {
+    t = fract(t) * 6.0;
+    vec3 color;
+    if (t < 1.0) color = mix(vec3(1,0,0), vec3(1,1,0), fract(t));
+    else if (t < 2.0) color = mix(vec3(1,1,0), vec3(0,1,0), fract(t));
+    else if (t < 3.0) color = mix(vec3(0,1,0), vec3(0,1,1), fract(t));
+    else if (t < 4.0) color = mix(vec3(0,1,1), vec3(0,0,1), fract(t));
+    else if (t < 5.0) color = mix(vec3(0,0,1), vec3(1,0,1), fract(t));
+    else color = mix(vec3(1,0,1), vec3(1,0,0), fract(t));
+    return color;
+}
+
+vec3 palette_classic(float t) {
+    t = fract(t);
+    vec3 c1 = vec3(0.0, 0.0, 0.3);
+    vec3 c2 = vec3(0.0, 0.3, 0.8);
+    vec3 c3 = vec3(0.5, 0.8, 1.0);
+    vec3 c4 = vec3(1.0, 0.9, 0.5);
+    vec3 c5 = vec3(0.8, 0.3, 0.0);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 get_color(float t, int mode) {
+    if (mode == 1) return palette_fire(t);
+    else if (mode == 2) return palette_ocean(t);
+    else if (mode == 3) return palette_grayscale(t);
+    else if (mode == 4) return palette_rainbow(t);
+    else if (mode == 5) return palette_classic(t);
+    return palette_cosine(t);
+}
+
+// ============================================
+// MANDELBROT COMPUTATION
+// ============================================
+
+struct FractalResult {
+    float smooth_value;
+    bool escaped;
+    float orbit_trap;
+    float distance_estimate;
+};
+
+FractalResult compute_mandelbrot(vec2 c, int max_iter, float bailout) {
+    FractalResult result;
+    vec2 z = vec2(0.0);
+    vec2 dz = vec2(1.0, 0.0);
+    
+    float min_orbit = 1e10;
+    int iter;
+    
+    for(iter = 0; iter < max_iter; iter++) {
+        // Derivative: dz = 2*z*dz + 1
+        float dz_x = 2.0 * (z.x * dz.x - z.y * dz.y) + 1.0;
+        float dz_y = 2.0 * (z.x * dz.y + z.y * dz.x);
+        dz = vec2(dz_x, dz_y);
+        
+        // z = z^2 + c
+        float z_x = z.x * z.x - z.y * z.y + c.x;
+        float z_y = 2.0 * z.x * z.y + c.y;
+        z = vec2(z_x, z_y);
+        
+        float len_sq = dot(z, z);
+        min_orbit = min(min_orbit, sqrt(len_sq));
+        
+        if(len_sq > bailout * bailout) {
+            // Smooth iteration with better formula
+            result.smooth_value = float(iter) + 1.0 - log2(log2(len_sq));
+            result.escaped = true;
+            result.orbit_trap = min_orbit;
+            
+            // Distance estimation
+            float z_len = sqrt(len_sq);
+            float dz_len = length(dz);
+            result.distance_estimate = z_len * log(z_len) / max(dz_len, 1e-10);
+            
+            return result;
+        }
+    }
+    
+    result.smooth_value = 0.0;
+    result.escaped = false;
+    result.orbit_trap = min_orbit;
+    result.distance_estimate = 0.0;
+    return result;
+}
+
+// ============================================
+// RENDERING WITH ANTIALIASING
+// ============================================
+
+vec3 render_at_coord(vec2 uv, ivec2 size, int max_iter, float bailout) {
+    float center_x = PushConstants.data1.x;
+    float center_y = PushConstants.data1.y;
+    float zoom = PushConstants.data1.z;
+    float aspect = float(size.x) / float(size.y);
+    
+    vec2 c;
+    c.x = center_x + (uv.x - 0.5) * zoom * aspect;
+    c.y = center_y + (uv.y - 0.5) * zoom;
+    
+    FractalResult result = compute_mandelbrot(c, max_iter, bailout);
+    
+    float color_offset = PushConstants.data2.x;
+    float color_scale = PushConstants.data2.y;
+    int palette_mode = int(PushConstants.data2.w);
+    int interior_style = int(PushConstants.data3.y);
+    bool orbit_trap_enabled = PushConstants.data3.z > 0.5;
+    
+    if (!result.escaped) {
+        // Interior coloring
+        if (interior_style == 0) {
+            return vec3(0.0);
+        } else if (interior_style == 1) {
+            float t = result.orbit_trap * 2.0;
+            return get_color(t, palette_mode) * 0.3;
+        } else {
+            return vec3(0.05);
+        }
+    }
+    
+    // Exterior coloring
+    float t;
+    if (orbit_trap_enabled) {
+        t = result.orbit_trap * 0.8;
+    } else {
+        t = result.smooth_value / float(max_iter);
+    }
+    
+    t = color_offset + t * color_scale;
+    vec3 color = get_color(t, palette_mode);
+    
+    // Subtle distance-based shading
+    float shading = 1.0 - smoothstep(0.0, 0.005, result.distance_estimate);
+    color = mix(color, color * 0.7, shading * 0.3);
+    
+    return color;
+}
+
+void main() {
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(image);
+    
+    if(texelCoord.x >= size.x || texelCoord.y >= size.y) {
+        return;
+    }
+    
+    int max_iter = int(PushConstants.data1.w);
+    float bailout = PushConstants.data2.z;
+    int aa_samples = int(PushConstants.data3.x);
+    
+    vec3 color = vec3(0.0);
+    
+    if (aa_samples <= 1) {
+        // No antialiasing
+        vec2 uv = (vec2(texelCoord) + 0.5) / vec2(size);
+        color = render_at_coord(uv, size, max_iter, bailout);
+    } else {
+        // Supersampling antialiasing
+        float samples = float(aa_samples);
+        float inv_samples = 1.0 / samples;
+        
+        for (int sy = 0; sy < aa_samples; sy++) {
+            for (int sx = 0; sx < aa_samples; sx++) {
+                vec2 offset = (vec2(sx, sy) + 0.5) * inv_samples;
+                vec2 uv = (vec2(texelCoord) + offset) / vec2(size);
+                color += render_at_coord(uv, size, max_iter, bailout);
+            }
+        }
+        
+        color /= (samples * samples);
+    }
+    
+    // Gamma correction for better display
+    color = pow(color, vec3(1.0 / 2.2));
+    
+    imageStore(image, texelCoord, vec4(color, 1.0));
+}

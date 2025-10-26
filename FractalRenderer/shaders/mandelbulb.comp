@@ -1,0 +1,220 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(push_constant) uniform constants {
+    vec4 data1; // camera_distance, rotation_y, power, max_iterations
+    vec4 data2; // color_offset, color_scale, bailout, palette_mode
+    vec4 data3; // time, fov, aa_samples, brightness
+    vec4 data4; // rotation_speed, saturation, contrast, unused
+} PushConstants;
+
+// ============================================================================
+// HSV TO RGB
+// ============================================================================
+vec3 hsv2rgb(vec3 c) {
+    vec3 rgb = clamp(abs(mod(c.x*6.0 + vec3(0.0,4.0,2.0),6.0)-3.0)-1.0,0.0,1.0);
+    return c.z * mix(vec3(1.0), rgb, c.y);
+}
+
+// ============================================================================
+// DYNAMIC / NEON / LAVA PALETTES
+// ============================================================================
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123);}
+float noise(vec2 p){
+    vec2 i = floor(p); vec2 f = fract(p);
+    float a = hash(i); float b = hash(i+vec2(1.0,0.0));
+    float c = hash(i+vec2(0.0,1.0)); float d = hash(i+vec2(1.0,1.0));
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(a,b,u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+}
+
+vec3 dynamic_palette(float t){
+    float hue = fract(t + 0.3*sin(t*12.0));
+    float sat = 0.6 + 0.4*sin(t*7.0);
+    float val = pow(t,0.4);
+    return hsv2rgb(vec3(hue,sat,val));
+}
+
+vec3 fire_and_ice(float t){
+    float blend = smoothstep(0.0,1.0,t);
+    vec3 fire = vec3(pow(blend,2.0), blend*0.5, 0.0);
+    vec3 ice  = vec3(0.0, 0.5 + 0.5*blend, 1.0);
+    return mix(fire, ice, fract(t*3.0));
+}
+
+vec3 lava_palette(float t){
+    vec3 c1=vec3(0.1,0.0,0.0); vec3 c2=vec3(0.8,0.1,0.0);
+    vec3 c3=vec3(1.0,0.5,0.0); vec3 c4=vec3(1.0,0.9,0.3); vec3 c5=vec3(1.0,1.0,0.8);
+    if(t<0.25)return mix(c1,c2,t*4.0);
+    else if(t<0.5)return mix(c2,c3,(t-0.25)*4.0);
+    else if(t<0.75)return mix(c3,c4,(t-0.5)*4.0);
+    else return mix(c4,c5,(t-0.75)*4.0);
+}
+
+vec3 neon_palette(float t){
+    vec3 c1=vec3(0.0,0.0,0.1); vec3 c2=vec3(0.0,0.2,0.6);
+    vec3 c3=vec3(0.0,0.8,1.0); vec3 c4=vec3(0.5,1.0,1.0);
+    return mix(mix(c1,c2,t),mix(c3,c4,t),pow(t,2.0));
+}
+
+vec3 get_palette_color(float t,int mode){
+    t=fract(t);
+    float n=noise(vec2(t*100.0,t*57.0))*0.02;
+    switch(mode){
+        case 0: return dynamic_palette(t+n);
+        case 1: return fire_and_ice(t+n);
+        case 2: return lava_palette(t+n);
+        case 3: return neon_palette(t+n);
+        case 4: return dynamic_palette(pow(t,0.5)+n);
+        case 5: return fire_and_ice(pow(t,0.6)+n);
+        default: return dynamic_palette(t+n);
+    }
+}
+
+// ============================================================================
+// COLOR ENHANCEMENT
+// ============================================================================
+vec3 aces_tonemap(vec3 color){
+    const float a=2.51,b=0.03,c=2.43,d=0.59,e=0.14;
+    return clamp((color*(a*color+b))/(color*(c*color+d)+e),0.0,1.0);
+}
+
+vec3 enhance_color(vec3 color,float brightness,float saturation,float contrast){
+    color*=brightness;
+    color=(color-0.5)*contrast+0.5;
+    float gray=dot(color,vec3(0.299,0.587,0.114));
+    color=mix(vec3(gray),color,saturation);
+    return clamp(color,0.0,1.0);
+}
+
+// ============================================================================
+// MANDELBULB DE
+// ============================================================================
+float mandelbulb_de(vec3 pos,float power,int max_iter,out float escape_iter){
+    vec3 z=pos; float dr=1.0; float r=0.0; escape_iter=float(max_iter);
+    for(int i=0;i<max_iter;i++){
+        r=length(z); if(r>2.0){escape_iter=float(i); break;} if(r<0.0001) break;
+        float theta=acos(clamp(z.z/r,-1.0,1.0));
+        float phi=atan(z.y,z.x);
+        float r_pow=pow(r,power-1.0); dr=r_pow*power*dr+1.0;
+        float zr=pow(r,power); theta*=power; phi*=power;
+        z=zr*vec3(sin(theta)*cos(phi),sin(phi)*sin(theta),cos(theta))+pos;
+    }
+    if(r<0.0001||dr<0.0001) return 0.0;
+    return 0.5*log(r)*r/dr;
+}
+
+// ============================================================================
+// NORMAL
+// ============================================================================
+vec3 calculate_normal(vec3 pos,float power,int max_iter){
+    const float eps=0.001; float dummy=0.0;
+    float d=mandelbulb_de(pos,power,max_iter,dummy);
+    vec3 n=vec3(
+        mandelbulb_de(pos+vec3(eps,0,0),power,max_iter,dummy)-d,
+        mandelbulb_de(pos+vec3(0,eps,0),power,max_iter,dummy)-d,
+        mandelbulb_de(pos+vec3(0,0,eps),power,max_iter,dummy)-d
+    );
+    float len=length(n); if(len<0.0001) return vec3(0,1,0);
+    return n/len;
+}
+
+// ============================================================================
+// ROTATION
+// ============================================================================
+mat3 rotation_y(float a){float c=cos(a),s=sin(a);return mat3(c,0,s,0,1,0,-s,0,c);}
+
+// ============================================================================
+// RAYMARCH
+// ============================================================================
+vec3 raymarch(vec3 ro,vec3 rd,float power,int max_iter,float color_offset,float color_scale,int palette_mode,float time){
+    float t=0.001; float escape_iter=0.0;
+    const int MAX_STEPS=200; const float MAX_DIST=10.0;
+    for(int i=0;i<MAX_STEPS;i++){
+        vec3 pos=ro+rd*t;
+        float d=mandelbulb_de(pos,power,max_iter,escape_iter);
+        if(isnan(d)||isinf(d)) break;
+        float threshold=max(0.0001,0.001*t);
+        if(d<threshold){
+            vec3 normal=calculate_normal(pos,power,max_iter);
+            vec3 light_dir=normalize(vec3(1.0,1.0,0.8));
+            float diffuse=max(dot(normal,light_dir),0.0); float ambient=0.15;
+            vec3 view_dir=-rd; vec3 reflect_dir=reflect(-light_dir,normal);
+            float spec=pow(max(dot(view_dir,reflect_dir),0.0),64.0);
+            float rim=pow(1.0-max(dot(normal,view_dir),0.0),2.0);
+            float glow=exp(-8.0*d); float filament_glow=exp(-30.0*d);
+            float iter_t=escape_iter+1.0-log(log(length(pos)))/log(power+0.0001);
+            iter_t/=float(max_iter); iter_t=fract(color_offset+pow(iter_t,0.6)*color_scale);
+            vec3 base_color=get_palette_color(iter_t,palette_mode);
+            vec3 alt_color=get_palette_color(fract(iter_t+0.33),(palette_mode+1)%6);
+            vec3 color=mix(base_color,alt_color,0.3+0.3*sin(time*0.5));
+            color*=ambient+diffuse*0.9; color+=vec3(spec)*0.5; color+=rim*0.25; color+=glow*0.5;
+            color+=vec3(1.0,0.8,0.5)*filament_glow*0.5;
+            float ao=0.0; for(float k=0.01;k<0.15;k+=0.02) ao+=exp(-10.0*mandelbulb_de(pos+normal*k,power,max_iter,escape_iter));
+            ao=1.0-ao/8.0; color*=ao*0.8+0.2;
+            float dist_factor=clamp(t/MAX_DIST,0.0,1.0);
+            color=mix(color,vec3(0.0,0.0,0.1),dist_factor*0.6);
+            return color;
+        }
+        if(t>MAX_DIST||d>MAX_DIST) break;
+        t+=max(d*0.5,0.0005);
+    }
+    float sky=clamp(rd.y*0.5+0.5,0.0,1.0);
+    return mix(vec3(0.02,0.02,0.05),vec3(0.5,0.6,0.8),sky);
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+void main(){
+    ivec2 texelCoord=ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size=imageSize(image);
+    if(texelCoord.x>=size.x||texelCoord.y>=size.y) return;
+
+    float camera_distance=max(PushConstants.data1.x,0.1);
+    float rotation_y_angle=PushConstants.data1.y;
+    float power=clamp(PushConstants.data1.z,2.0,16.0);
+    int max_iter=clamp(int(PushConstants.data1.w),1,1024);
+    float color_offset=PushConstants.data2.x;
+    float color_scale=max(PushConstants.data2.y,0.1);
+    int palette_mode=clamp(int(PushConstants.data2.w),0,5);
+    float time=PushConstants.data3.x;
+    float fov=clamp(PushConstants.data3.y,0.1,3.0);
+    int aa_samples=max(int(PushConstants.data3.z),1);
+    float brightness=max(PushConstants.data3.w,0.1);
+    float rotation_speed=PushConstants.data4.x!=0.0?PushConstants.data4.x:0.3;
+    float saturation=max(PushConstants.data4.y,0.0);
+    float contrast=max(PushConstants.data4.z,0.1);
+
+    float rotation=rotation_y_angle+rotation_speed*time;
+    float zoom_amplitude=0.3;
+    float dynamic_distance=camera_distance*(1.0+zoom_amplitude*sin(time*0.5));
+    vec3 ro=vec3(0.0,0.0,dynamic_distance);
+    mat3 rot=rotation_y(rotation);
+    ro=rot*ro;
+    float dynamic_power=power+0.5*sin(time*0.7);
+
+    vec3 final_color=vec3(0.0);
+    for(int sy=0;sy<aa_samples;sy++){
+        for(int sx=0;sx<aa_samples;sx++){
+            vec2 offset=vec2(float(sx),float(sy))/float(aa_samples);
+            vec2 pixel_pos=vec2(texelCoord)+offset;
+            vec2 uv=(pixel_pos-vec2(size)*0.5)/float(size.y);
+            vec3 forward=normalize(-ro);
+            vec3 right=normalize(cross(vec3(0,1,0),forward));
+            vec3 up=cross(forward,right);
+            vec3 rd=normalize(forward+right*uv.x*fov+up*uv.y*fov);
+            vec3 color=raymarch(ro,rd,dynamic_power,max_iter,color_offset,color_scale,palette_mode,time);
+            final_color+=color;
+        }
+    }
+
+    final_color/=float(aa_samples*aa_samples);
+    final_color=enhance_color(final_color,brightness,saturation,contrast);
+    final_color=aces_tonemap(final_color);
+    final_color=pow(final_color,vec3(1.0/2.2));
+    imageStore(image,texelCoord,vec4(final_color,1.0));
+}

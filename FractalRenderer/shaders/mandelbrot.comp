@@ -1,0 +1,238 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba16f) uniform image2D destImage;
+
+layout(push_constant) uniform PushConstants {
+    vec4 data1; // center_x, center_y, zoom, max_iterations
+    vec4 data2; // color_offset, color_scale, bailout, palette_mode
+    vec4 data3; // aa_samples, interior_style, orbit_trap_enabled, orbit_trap_radius
+    vec4 data4; // stripe_density, stripe_enabled, brightness, saturation
+    vec4 data5; // contrast, unused, unused, unused
+} pc;
+
+// Convenient aliases
+#define fractal_center       pc.data1.xy
+#define fractal_zoom         pc.data1.z
+#define fractal_max_iter     int(pc.data1.w)
+#define fractal_color_offset pc.data2.x
+#define fractal_color_scale  pc.data2.y
+#define fractal_bailout      pc.data2.z
+#define fractal_palette_mode int(pc.data2.w)
+#define aa_samples           int(pc.data3.x)
+#define interior_style       int(pc.data3.y)
+#define orbit_trap_enabled   int(pc.data3.z)
+#define orbit_trap_radius    pc.data3.w
+#define stripe_density       pc.data4.x
+#define stripe_enabled       int(pc.data4.y)
+#define brightness           pc.data4.z
+#define saturation           pc.data4.w
+#define contrast             pc.data5.x
+
+// -----------------------------------------------------------------------------
+// Utility functions
+// -----------------------------------------------------------------------------
+
+// ACES filmic tone mapping
+vec3 aces_tonemap(vec3 color) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+}
+
+// Color enhancement (brightness, contrast, saturation)
+vec3 enhance_color(vec3 color, float _brightness, float _saturation, float _contrast) {
+    color *= _brightness;
+    color = (color - 0.5) * _contrast + 0.5;
+    float gray = dot(color, vec3(0.299, 0.587, 0.114));
+    color = mix(vec3(gray), color, _saturation);
+    return clamp(color, 0.0, 1.0);
+}
+
+// -----------------------------------------------------------------------------
+// Palettes
+// -----------------------------------------------------------------------------
+
+vec3 palette_fire(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.1);
+    vec3 c2 = vec3(0.8, 0.0, 0.0);
+    vec3 c3 = vec3(1.0, 0.3, 0.0);
+    vec3 c4 = vec3(1.0, 0.9, 0.0);
+    vec3 c5 = vec3(1.0, 1.0, 0.95);
+    t = pow(t, 0.7);
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.6) return mix(c3, c4, (t - 0.4) * 5.0);
+    else if (t < 0.8) return mix(c4, c5, (t - 0.6) * 5.0);
+    else return c5;
+}
+
+vec3 palette_electric(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.05);
+    vec3 c2 = vec3(0.0, 0.1, 0.4);
+    vec3 c3 = vec3(0.0, 0.5, 1.0);
+    vec3 c4 = vec3(0.3, 0.8, 1.0);
+    vec3 c5 = vec3(0.8, 1.0, 1.0);
+    t = smoothstep(0.0, 1.0, t);
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 palette_grayscale(float t) {
+    return vec3(t);
+}
+
+vec3 palette_nebula(float t) {
+    t = fract(t);
+    vec3 c1 = vec3(0.02, 0.00, 0.05);
+    vec3 c2 = vec3(0.15, 0.00, 0.25);
+    vec3 c3 = vec3(0.00, 0.40, 0.60);
+    vec3 c4 = vec3(0.00, 0.90, 1.00);
+    vec3 c5 = vec3(0.90, 0.95, 1.00);
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 palette_solar(float t) {
+    t = pow(fract(t), 0.9);
+    vec3 c1 = vec3(0.1, 0.0, 0.1);
+    vec3 c2 = vec3(0.5, 0.0, 0.2);
+    vec3 c3 = vec3(0.9, 0.3, 0.0);
+    vec3 c4 = vec3(1.0, 0.8, 0.3);
+    vec3 c5 = vec3(1.0, 1.0, 0.9);
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 palette_ocean(float t) {
+    t = pow(fract(t), 0.85);
+    vec3 c1 = vec3(0.0, 0.05, 0.08);
+    vec3 c2 = vec3(0.0, 0.3, 0.5);
+    vec3 c3 = vec3(0.0, 0.7, 0.9);
+    vec3 c4 = vec3(0.2, 0.9, 1.0);
+    vec3 c5 = vec3(0.9, 1.0, 1.0);
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+vec3 get_palette_color(float t, int mode) {
+    t = fract(t);
+    switch (mode) {
+        case 0: return palette_fire(t);
+        case 1: return palette_electric(t);
+        case 2: return palette_grayscale(t);
+        case 3: return palette_nebula(t);
+        case 4: return palette_solar(t);
+        case 5: return palette_ocean(t);
+        default: return palette_fire(t);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Mandelbrot sampling with improved orbit-trap & stripe shading
+// -----------------------------------------------------------------------------
+
+vec3 compute_sample(vec2 pixel_pos, ivec2 imgSize)
+{
+    vec2 resolution = vec2(imgSize);
+    vec2 uv = (pixel_pos - 0.5 * resolution) / resolution.y;
+    vec2 c = fractal_center + uv * fractal_zoom;
+
+    vec2 z = vec2(0.0);
+    int i = 0;
+    float minTrap = 1e20;
+
+    for (; i < fractal_max_iter; ++i) {
+        float x = z.x * z.x - z.y * z.y + c.x;
+        float y = 2.0 * z.x * z.y + c.y;
+        z = vec2(x, y);
+
+        // Smooth, combined trap detection
+        float distToOrigin = length(z);
+        float distToAxes = min(abs(z.x), abs(z.y));
+        float distToC = length(z - c);
+        minTrap = min(minTrap, min(distToOrigin, min(distToAxes, distToC)));
+
+        if (dot(z, z) > fractal_bailout * fractal_bailout)
+            break;
+    }
+
+    float nu = float(i);
+    if (i < fractal_max_iter) {
+        float log_zn = log(dot(z, z)) / 2.0;
+        float mu = log(log_zn / log(2.0)) / log(2.0);
+        nu = float(i) + 1.0 - mu;
+    }
+
+    float t = clamp(nu / float(fractal_max_iter) * fractal_color_scale, 0.0, 1.0);
+
+    // --- Interior styles
+    if (i >= fractal_max_iter) {
+        if (interior_style == 1) return vec3(0.0);
+        else if (interior_style == 2) {
+            float trapFactor = exp(-minTrap * 6.0 / max(orbit_trap_radius, 1e-6));
+            return get_palette_color(fractal_color_offset + trapFactor * 0.3, fractal_palette_mode);
+        }
+    }
+
+    vec3 color = get_palette_color(t + fractal_color_offset, fractal_palette_mode);
+
+    // --- Orbit trap blend
+    if (orbit_trap_enabled != 0) {
+        float r = max(orbit_trap_radius, 1e-6);
+        float trapFactor = exp(-minTrap * 4.0 / r);
+        vec3 trapColor = vec3(1.0, 0.8, 0.4);
+        color = mix(color, trapColor, clamp(trapFactor * 0.8, 0.0, 1.0));
+    }
+
+    // --- Stripe shading (smoother modulation)
+    if (stripe_enabled != 0) {
+        float angle = atan(z.y, z.x);
+        float stripes = 0.5 + 0.5 * sin(angle * stripe_density + nu * 0.3);
+        color *= mix(0.7, 1.3, stripes);
+    }
+
+    return color;
+}
+
+// -----------------------------------------------------------------------------
+// Main
+// -----------------------------------------------------------------------------
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(destImage);
+    if (pix.x >= imgSize.x || pix.y >= imgSize.y) return;
+
+    int aa = max(aa_samples, 1);
+    vec3 final_color = vec3(0.0);
+
+    for (int sy = 0; sy < aa; sy++) {
+        for (int sx = 0; sx < aa; sx++) {
+            vec2 offset = vec2(float(sx), float(sy)) / float(aa);
+            vec2 pixel_pos = vec2(pix) + offset;
+            final_color += compute_sample(pixel_pos, imgSize);
+        }
+    }
+
+    final_color /= float(aa * aa);
+
+    // Post-processing (tone + enhancement + gamma)
+    final_color = enhance_color(final_color, brightness, saturation, contrast);
+    final_color = aces_tonemap(final_color);
+    final_color = pow(final_color, vec3(1.0 / 2.2));
+
+    imageStore(destImage, pix, vec4(final_color, 1.0));
+}

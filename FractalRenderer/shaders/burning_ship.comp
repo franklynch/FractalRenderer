@@ -1,0 +1,408 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(push_constant) uniform constants {
+    vec4 data1; // center_x, center_y, zoom, max_iterations
+    vec4 data2; // color_offset, color_scale, bailout, palette_mode
+    vec4 data3; // antialiasing_samples, interior_style, orbit_trap_enabled, orbit_trap_radius
+    vec4 data4; // stripe_density, stripe_enabled, brightness, saturation
+    vec4 data5; // contrast, unused, unused, unused
+} PushConstants;
+
+// ============================================================================
+// ENHANCED PALETTES
+// ============================================================================
+
+// Ultra Fire - More vibrant with white-hot cores
+vec3 palette_ultra_fire(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.1);
+    vec3 c2 = vec3(0.8, 0.0, 0.0);
+    vec3 c3 = vec3(1.0, 0.3, 0.0);
+    vec3 c4 = vec3(1.0, 0.9, 0.0);
+    vec3 c5 = vec3(1.0, 1.0, 0.95);
+    
+    t = pow(t, 0.7);
+    
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.6) return mix(c3, c4, (t - 0.4) * 5.0);
+    else if (t < 0.8) return mix(c4, c5, (t - 0.6) * 5.0);
+    else return c5;
+}
+
+// Electric Blue - Neon cyber aesthetic
+vec3 palette_electric(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.05);
+    vec3 c2 = vec3(0.0, 0.1, 0.4);
+    vec3 c3 = vec3(0.0, 0.5, 1.0);
+    vec3 c4 = vec3(0.3, 0.8, 1.0);
+    vec3 c5 = vec3(0.8, 1.0, 1.0);
+    
+    t = smoothstep(0.0, 1.0, t);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Enhanced Ocean - Better blues
+vec3 palette_ocean_enhanced(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.1);
+    vec3 c2 = vec3(0.0, 0.1, 0.3);
+    vec3 c3 = vec3(0.0, 0.4, 0.7);
+    vec3 c4 = vec3(0.0, 0.7, 1.0);
+    vec3 c5 = vec3(0.5, 1.0, 1.0);
+    
+    t = smoothstep(0.0, 1.0, t);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Sunset/Sunrise - Warm and organic
+vec3 palette_sunset(float t) {
+    vec3 c1 = vec3(0.1, 0.0, 0.2);
+    vec3 c2 = vec3(0.5, 0.1, 0.3);
+    vec3 c3 = vec3(1.0, 0.3, 0.2);
+    vec3 c4 = vec3(1.0, 0.7, 0.3);
+    vec3 c5 = vec3(1.0, 0.95, 0.7);
+    
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.6) return mix(c3, c4, (t - 0.4) * 5.0);
+    else if (t < 0.8) return mix(c4, c5, (t - 0.6) * 5.0);
+    else return c5;
+}
+
+// Cosmic - Deep space colors
+vec3 palette_cosmic(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.0);
+    vec3 c2 = vec3(0.2, 0.0, 0.4);
+    vec3 c3 = vec3(0.4, 0.0, 0.6);
+    vec3 c4 = vec3(0.8, 0.3, 0.9);
+    vec3 c5 = vec3(1.0, 0.7, 1.0);
+    
+    t = pow(t, 0.8);
+    
+    if (t < 0.3) return mix(c1, c2, t / 0.3);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.3) / 0.2);
+    else if (t < 0.7) return mix(c3, c4, (t - 0.5) / 0.2);
+    else return mix(c4, c5, (t - 0.7) / 0.3);
+}
+
+// Gold Rush - Rich metallics
+vec3 palette_gold(float t) {
+    vec3 c1 = vec3(0.1, 0.05, 0.0);
+    vec3 c2 = vec3(0.4, 0.2, 0.0);
+    vec3 c3 = vec3(0.8, 0.5, 0.1);
+    vec3 c4 = vec3(1.0, 0.8, 0.3);
+    vec3 c5 = vec3(1.0, 1.0, 0.9);
+    
+    t = smoothstep(0.0, 1.0, t);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Vaporwave - 80s aesthetic
+vec3 palette_vaporwave(float t) {
+    vec3 c1 = vec3(0.1, 0.0, 0.2);
+    vec3 c2 = vec3(0.5, 0.0, 0.5);
+    vec3 c3 = vec3(1.0, 0.0, 0.8);
+    vec3 c4 = vec3(0.0, 0.8, 1.0);
+    vec3 c5 = vec3(1.0, 0.5, 1.0);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Forest - Natural greens
+vec3 palette_forest(float t) {
+    vec3 c1 = vec3(0.0, 0.05, 0.0);
+    vec3 c2 = vec3(0.0, 0.2, 0.1);
+    vec3 c3 = vec3(0.1, 0.5, 0.2);
+    vec3 c4 = vec3(0.3, 0.8, 0.4);
+    vec3 c5 = vec3(0.8, 1.0, 0.6);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Lava - Molten rock
+vec3 palette_lava(float t) {
+    vec3 c1 = vec3(0.1, 0.0, 0.0);
+    vec3 c2 = vec3(0.6, 0.0, 0.0);
+    vec3 c3 = vec3(1.0, 0.2, 0.0);
+    vec3 c4 = vec3(1.0, 0.6, 0.0);
+    vec3 c5 = vec3(1.0, 1.0, 0.5);
+    
+    t = pow(t, 0.6);
+    
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.7) return mix(c3, c4, (t - 0.4) / 0.3);
+    else return mix(c4, c5, (t - 0.7) / 0.3);
+}
+
+// Grayscale
+vec3 palette_grayscale(float t) {
+    return vec3(t);
+}
+
+// Palette dispatcher
+vec3 get_palette_color(float t, int palette_mode) {
+    t = fract(t);
+    
+    switch(palette_mode) {
+        case 0: return palette_ultra_fire(t);
+        case 1: return palette_electric(t);
+        case 2: return palette_ocean_enhanced(t);
+        case 3: return palette_sunset(t);
+        case 4: return palette_cosmic(t);
+        case 5: return palette_gold(t);
+        case 6: return palette_vaporwave(t);
+        case 7: return palette_forest(t);
+        case 8: return palette_lava(t);
+        case 9: return palette_grayscale(t);
+        default: return palette_ultra_fire(t);
+    }
+}
+
+// ============================================================================
+// COLOR ENHANCEMENT
+// ============================================================================
+
+// ACES filmic tone mapping
+vec3 aces_tonemap(vec3 color) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+}
+
+// Color enhancement function
+vec3 enhance_color(vec3 color, float brightness, float saturation, float contrast) {
+    // Apply brightness
+    color *= brightness;
+    
+    // Apply contrast
+    color = (color - 0.5) * contrast + 0.5;
+    
+    // Apply saturation
+    float gray = dot(color, vec3(0.299, 0.587, 0.114));
+    color = mix(vec3(gray), color, saturation);
+    
+    return clamp(color, 0.0, 1.0);
+}
+
+// ============================================================================
+// BURNING SHIP COMPUTATION
+// ============================================================================
+
+// Burning Ship fractal computation with advanced features
+vec3 compute_burning_ship(vec2 c, int max_iter, float bailout, float color_offset, 
+                          float color_scale, int palette_mode, int interior_style,
+                          bool orbit_trap_enabled, float orbit_trap_radius,
+                          float stripe_density, bool stripe_enabled) {
+    
+    vec2 z = vec2(0.0);
+    int iter;
+    float smooth_val = 0.0;
+    float min_orbit_dist = 1e10;
+    float stripe_value = 0.0;
+    
+    for(iter = 0; iter < max_iter; iter++) {
+        // Orbit trap: track minimum distance to origin (before abs)
+        if (orbit_trap_enabled) {
+            float dist = length(z);
+            min_orbit_dist = min(min_orbit_dist, abs(dist - orbit_trap_radius));
+        }
+        
+        // Stripe averaging (before abs for interesting patterns)
+        if (stripe_enabled && interior_style == 2) {
+            stripe_value += sin(z.y * stripe_density);
+        }
+        
+        // BURNING SHIP VARIATION: Take absolute values
+        z = abs(z);
+        
+        // Standard iteration: z = z^2 + c
+        float x_temp = z.x * z.x - z.y * z.y + c.x;
+        z.y = 2.0 * z.x * z.y + c.y;
+        z.x = x_temp;
+        
+        float len_sq = z.x * z.x + z.y * z.y;
+        
+        if(len_sq > bailout * bailout) {
+            // Escaped - smooth coloring
+            smooth_val = float(iter) + 1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
+            break;
+        }
+    }
+    
+    vec3 color;
+    
+    if(iter == max_iter) {
+        // Interior point - use interior style
+        if (interior_style == 0) {
+            // Black interior
+            color = vec3(0.0);
+        }
+        else if (interior_style == 1) {
+            // Orbit trap coloring
+            if (orbit_trap_enabled) {
+                float t = 1.0 - clamp(min_orbit_dist * 5.0, 0.0, 1.0);
+                color = get_palette_color(t, palette_mode) * 0.5;
+            } else {
+                color = vec3(0.0);
+            }
+        }
+        else if (interior_style == 2) {
+            // Stripe coloring
+            if (stripe_enabled) {
+                stripe_value = stripe_value / float(max_iter);
+                float t = (stripe_value + 1.0) * 0.5;
+                color = get_palette_color(t, palette_mode) * 0.3;
+            } else {
+                color = vec3(0.0);
+            }
+        }
+        else if (interior_style == 3) {
+            // Distance estimation (simplified)
+            float dist = length(z);
+            float t = clamp(dist * 0.5, 0.0, 1.0);
+            color = get_palette_color(t, palette_mode) * 0.4;
+        }
+        else {
+            color = vec3(0.0);
+        }
+    } else {
+        // Exterior - standard coloring with orbit trap influence
+        float t = smooth_val / float(max_iter);
+        t = color_offset + t * color_scale;
+        
+        color = get_palette_color(t, palette_mode);
+        
+        // Blend with orbit trap if enabled
+        if (orbit_trap_enabled) {
+            float trap_influence = 1.0 - clamp(min_orbit_dist * 2.0, 0.0, 1.0);
+            vec3 trap_color = get_palette_color(trap_influence, palette_mode);
+            color = mix(color, trap_color, trap_influence * 0.3);
+        }
+    }
+    
+    return color;
+}
+
+// Supersampling antialiasing for Burning Ship
+vec3 sample_with_aa(vec2 base_uv, ivec2 size, float center_x, float center_y,
+                    float zoom, int max_iter, float bailout, float color_offset,
+                    float color_scale, int palette_mode, int aa_samples,
+                    int interior_style, bool orbit_trap_enabled, 
+                    float orbit_trap_radius, float stripe_density, bool stripe_enabled) {
+    
+    if (aa_samples <= 1) {
+        // No antialiasing
+        float aspect = float(size.x) / float(size.y);
+        vec2 c;
+        c.x = center_x + (base_uv.x - 0.5) * zoom * aspect;
+        c.y = center_y + (base_uv.y - 0.5) * zoom;
+        
+        return compute_burning_ship(c, max_iter, bailout, color_offset, color_scale,
+                                    palette_mode, interior_style, orbit_trap_enabled,
+                                    orbit_trap_radius, stripe_density, stripe_enabled);
+    } else {
+        // Supersampling
+        vec3 accumulated_color = vec3(0.0);
+        float pixel_size = 1.0 / float(size.x);
+        float sample_offset = pixel_size / float(aa_samples);
+        
+        for (int sx = 0; sx < aa_samples; sx++) {
+            for (int sy = 0; sy < aa_samples; sy++) {
+                vec2 offset = vec2(float(sx), float(sy)) * sample_offset - 
+                             sample_offset * float(aa_samples - 1) * 0.5;
+                vec2 sample_uv = base_uv + offset / vec2(size);
+                
+                float aspect = float(size.x) / float(size.y);
+                vec2 c;
+                c.x = center_x + (sample_uv.x - 0.5) * zoom * aspect;
+                c.y = center_y + (sample_uv.y - 0.5) * zoom;
+                
+                accumulated_color += compute_burning_ship(c, max_iter, bailout, color_offset,
+                                                         color_scale, palette_mode, interior_style,
+                                                         orbit_trap_enabled, orbit_trap_radius,
+                                                         stripe_density, stripe_enabled);
+            }
+        }
+        
+        return accumulated_color / float(aa_samples * aa_samples);
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(image);
+    
+    if(texelCoord.x >= size.x || texelCoord.y >= size.y) {
+        return;
+    }
+    
+    // Unpack push constants
+    float center_x = PushConstants.data1.x;
+    float center_y = PushConstants.data1.y;
+    float zoom = PushConstants.data1.z;
+    int max_iter = int(PushConstants.data1.w);
+    
+    float color_offset = PushConstants.data2.x;
+    float color_scale = PushConstants.data2.y;
+    float bailout = PushConstants.data2.z;
+    int palette_mode = int(PushConstants.data2.w);
+    
+    int aa_samples = int(PushConstants.data3.x);
+    int interior_style = int(PushConstants.data3.y);
+    bool orbit_trap_enabled = PushConstants.data3.z > 0.5;
+    float orbit_trap_radius = PushConstants.data3.w;
+    
+    float stripe_density = PushConstants.data4.x;
+    bool stripe_enabled = PushConstants.data4.y > 0.5;
+    float brightness = max(PushConstants.data4.z, 0.1);
+    float saturation = max(PushConstants.data4.w, 0.0);
+    
+    float contrast = max(PushConstants.data5.x, 0.1);
+    
+    vec2 uv = vec2(texelCoord) / vec2(size);
+    
+    vec3 color = sample_with_aa(uv, size, center_x, center_y, zoom, max_iter,
+                                bailout, color_offset, color_scale, palette_mode,
+                                aa_samples, interior_style, orbit_trap_enabled,
+                                orbit_trap_radius, stripe_density, stripe_enabled);
+    
+    // Apply color enhancement
+    color = enhance_color(color, brightness, saturation, contrast);
+    
+    // Apply ACES tone mapping
+    color = aces_tonemap(color);
+    
+    // Gamma correction
+    color = pow(color, vec3(1.0 / 2.2));
+    
+    imageStore(image, texelCoord, vec4(color, 1.0));
+}

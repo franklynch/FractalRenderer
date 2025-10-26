@@ -1,0 +1,340 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(push_constant) uniform constants {
+    vec4 data1; // center_x, center_y, zoom, max_iterations
+    vec4 data2; // c_real, c_imag, bailout, color_offset
+    vec4 data3; // aa_samples, color_scale, brightness, saturation
+    vec4 data4; // contrast, palette_mode, unused, unused
+    vec4 data5; // unused
+} PushConstants;
+
+// ============================================================================
+// ENHANCED PALETTES
+// ============================================================================
+
+// Ultra Fire - More vibrant with white-hot cores
+vec3 palette_ultra_fire(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.1);
+    vec3 c2 = vec3(0.8, 0.0, 0.0);
+    vec3 c3 = vec3(1.0, 0.3, 0.0);
+    vec3 c4 = vec3(1.0, 0.9, 0.0);
+    vec3 c5 = vec3(1.0, 1.0, 0.95);
+    
+    t = pow(t, 0.7);
+    
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.6) return mix(c3, c4, (t - 0.4) * 5.0);
+    else if (t < 0.8) return mix(c4, c5, (t - 0.6) * 5.0);
+    else return c5;
+}
+
+// Electric Blue - Neon cyber aesthetic
+vec3 palette_electric(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.05);
+    vec3 c2 = vec3(0.0, 0.1, 0.4);
+    vec3 c3 = vec3(0.0, 0.5, 1.0);
+    vec3 c4 = vec3(0.3, 0.8, 1.0);
+    vec3 c5 = vec3(0.8, 1.0, 1.0);
+    
+    t = smoothstep(0.0, 1.0, t);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Enhanced Ocean - Better blues
+vec3 palette_ocean_enhanced(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.1);
+    vec3 c2 = vec3(0.0, 0.1, 0.3);
+    vec3 c3 = vec3(0.0, 0.4, 0.7);
+    vec3 c4 = vec3(0.0, 0.7, 1.0);
+    vec3 c5 = vec3(0.5, 1.0, 1.0);
+    
+    t = smoothstep(0.0, 1.0, t);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Sunset/Sunrise - Warm and organic
+vec3 palette_sunset(float t) {
+    vec3 c1 = vec3(0.1, 0.0, 0.2);
+    vec3 c2 = vec3(0.5, 0.1, 0.3);
+    vec3 c3 = vec3(1.0, 0.3, 0.2);
+    vec3 c4 = vec3(1.0, 0.7, 0.3);
+    vec3 c5 = vec3(1.0, 0.95, 0.7);
+    
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.6) return mix(c3, c4, (t - 0.4) * 5.0);
+    else if (t < 0.8) return mix(c4, c5, (t - 0.6) * 5.0);
+    else return c5;
+}
+
+// Cosmic - Deep space colors
+vec3 palette_cosmic(float t) {
+    vec3 c1 = vec3(0.0, 0.0, 0.0);
+    vec3 c2 = vec3(0.2, 0.0, 0.4);
+    vec3 c3 = vec3(0.4, 0.0, 0.6);
+    vec3 c4 = vec3(0.8, 0.3, 0.9);
+    vec3 c5 = vec3(1.0, 0.7, 1.0);
+    
+    t = pow(t, 0.8);
+    
+    if (t < 0.3) return mix(c1, c2, t / 0.3);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.3) / 0.2);
+    else if (t < 0.7) return mix(c3, c4, (t - 0.5) / 0.2);
+    else return mix(c4, c5, (t - 0.7) / 0.3);
+}
+
+// Gold Rush - Rich metallics
+vec3 palette_gold(float t) {
+    vec3 c1 = vec3(0.1, 0.05, 0.0);
+    vec3 c2 = vec3(0.4, 0.2, 0.0);
+    vec3 c3 = vec3(0.8, 0.5, 0.1);
+    vec3 c4 = vec3(1.0, 0.8, 0.3);
+    vec3 c5 = vec3(1.0, 1.0, 0.9);
+    
+    t = smoothstep(0.0, 1.0, t);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Vaporwave - 80s aesthetic
+vec3 palette_vaporwave(float t) {
+    vec3 c1 = vec3(0.1, 0.0, 0.2);
+    vec3 c2 = vec3(0.5, 0.0, 0.5);
+    vec3 c3 = vec3(1.0, 0.0, 0.8);
+    vec3 c4 = vec3(0.0, 0.8, 1.0);
+    vec3 c5 = vec3(1.0, 0.5, 1.0);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Forest - Natural greens
+vec3 palette_forest(float t) {
+    vec3 c1 = vec3(0.0, 0.05, 0.0);
+    vec3 c2 = vec3(0.0, 0.2, 0.1);
+    vec3 c3 = vec3(0.1, 0.5, 0.2);
+    vec3 c4 = vec3(0.3, 0.8, 0.4);
+    vec3 c5 = vec3(0.8, 1.0, 0.6);
+    
+    if (t < 0.25) return mix(c1, c2, t * 4.0);
+    else if (t < 0.5) return mix(c2, c3, (t - 0.25) * 4.0);
+    else if (t < 0.75) return mix(c3, c4, (t - 0.5) * 4.0);
+    else return mix(c4, c5, (t - 0.75) * 4.0);
+}
+
+// Lava - Molten rock
+vec3 palette_lava(float t) {
+    vec3 c1 = vec3(0.1, 0.0, 0.0);
+    vec3 c2 = vec3(0.6, 0.0, 0.0);
+    vec3 c3 = vec3(1.0, 0.2, 0.0);
+    vec3 c4 = vec3(1.0, 0.6, 0.0);
+    vec3 c5 = vec3(1.0, 1.0, 0.5);
+    
+    t = pow(t, 0.6);
+    
+    if (t < 0.2) return mix(c1, c2, t * 5.0);
+    else if (t < 0.4) return mix(c2, c3, (t - 0.2) * 5.0);
+    else if (t < 0.7) return mix(c3, c4, (t - 0.4) / 0.3);
+    else return mix(c4, c5, (t - 0.7) / 0.3);
+}
+
+// Grayscale
+vec3 palette_grayscale(float t) {
+    return vec3(t);
+}
+
+// Palette dispatcher
+vec3 get_palette_color(float t, int palette_mode) {
+    t = fract(t);
+    
+    switch(palette_mode) {
+        case 0: return palette_ultra_fire(t);
+        case 1: return palette_electric(t);
+        case 2: return palette_ocean_enhanced(t);
+        case 3: return palette_sunset(t);
+        case 4: return palette_cosmic(t);
+        case 5: return palette_gold(t);
+        case 6: return palette_vaporwave(t);
+        case 7: return palette_forest(t);
+        case 8: return palette_lava(t);
+        case 9: return palette_grayscale(t);
+        default: return palette_ultra_fire(t);
+    }
+}
+
+// ============================================================================
+// COLOR ENHANCEMENT
+// ============================================================================
+
+// ACES filmic tone mapping
+vec3 aces_tonemap(vec3 color) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+}
+
+// Color enhancement function
+vec3 enhance_color(vec3 color, float brightness, float saturation, float contrast) {
+    // Apply brightness
+    color *= brightness;
+    
+    // Apply contrast
+    color = (color - 0.5) * contrast + 0.5;
+    
+    // Apply saturation
+    float gray = dot(color, vec3(0.299, 0.587, 0.114));
+    color = mix(vec3(gray), color, saturation);
+    
+    return clamp(color, 0.0, 1.0);
+}
+
+// ============================================================================
+// JULIA SET CALCULATION
+// ============================================================================
+
+vec3 sample_julia(vec2 base_uv, ivec2 size, float center_x, float center_y, 
+                  float zoom, int max_iter, vec2 c, float bailout, 
+                  float color_offset, float color_scale, int aa_samples, int palette_mode) {
+    
+    if (aa_samples <= 1) {
+        // No antialiasing - single sample
+        float aspect = float(size.x) / float(size.y);
+        vec2 z;
+        z.x = center_x + (base_uv.x - 0.5) * zoom * aspect;
+        z.y = center_y + (base_uv.y - 0.5) * zoom;
+        
+        int iter;
+        float smooth_val = 0.0;
+        
+        for(iter = 0; iter < max_iter; iter++) {
+            float x_temp = z.x * z.x - z.y * z.y + c.x;
+            z.y = 2.0 * z.x * z.y + c.y;
+            z.x = x_temp;
+            
+            float len_sq = z.x * z.x + z.y * z.y;
+            
+            if(len_sq > bailout * bailout) {
+                smooth_val = float(iter) + 1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
+                break;
+            }
+        }
+        
+        if(iter == max_iter) {
+            return vec3(0.0);
+        } else {
+            float t = smooth_val / float(max_iter);
+            t = color_offset + t * color_scale;
+            return get_palette_color(t, palette_mode);
+        }
+    } else {
+        // Supersampling antialiasing
+        vec3 accumulated_color = vec3(0.0);
+        float pixel_size = 1.0 / float(size.x);
+        float sample_offset = pixel_size / float(aa_samples);
+        
+        for (int sx = 0; sx < aa_samples; sx++) {
+            for (int sy = 0; sy < aa_samples; sy++) {
+                vec2 offset = vec2(float(sx), float(sy)) * sample_offset - sample_offset * float(aa_samples - 1) * 0.5;
+                vec2 sample_uv = base_uv + offset / vec2(size);
+                
+                float aspect = float(size.x) / float(size.y);
+                vec2 z;
+                z.x = center_x + (sample_uv.x - 0.5) * zoom * aspect;
+                z.y = center_y + (sample_uv.y - 0.5) * zoom;
+                
+                int iter;
+                float smooth_val = 0.0;
+                
+                for(iter = 0; iter < max_iter; iter++) {
+                    float x_temp = z.x * z.x - z.y * z.y + c.x;
+                    z.y = 2.0 * z.x * z.y + c.y;
+                    z.x = x_temp;
+                    
+                    float len_sq = z.x * z.x + z.y * z.y;
+                    
+                    if(len_sq > bailout * bailout) {
+                        smooth_val = float(iter) + 1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
+                        break;
+                    }
+                }
+                
+                if(iter == max_iter) {
+                    accumulated_color += vec3(0.0);
+                } else {
+                    float t = smooth_val / float(max_iter);
+                    t = color_offset + t * color_scale;
+                    accumulated_color += get_palette_color(t, palette_mode);
+                }
+            }
+        }
+        
+        return accumulated_color / float(aa_samples * aa_samples);
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(image);
+    
+    if(texelCoord.x >= size.x || texelCoord.y >= size.y) {
+        return;
+    }
+    
+    float center_x = PushConstants.data1.x;
+    float center_y = PushConstants.data1.y;
+    float zoom = PushConstants.data1.z;
+    int max_iter = int(PushConstants.data1.w);
+    
+    vec2 c = vec2(PushConstants.data2.x, PushConstants.data2.y);
+    float bailout = PushConstants.data2.z;
+    float color_offset = PushConstants.data2.w;
+    
+    int aa_samples = max(int(PushConstants.data3.x), 1);
+    float color_scale = PushConstants.data3.y;
+    float brightness = max(PushConstants.data3.z, 0.1);
+    float saturation = max(PushConstants.data3.w, 0.0);
+    
+    float contrast = max(PushConstants.data4.x, 0.1);
+    int palette_mode = int(PushConstants.data4.y);
+    
+    vec2 uv = vec2(texelCoord) / vec2(size);
+    
+    vec3 color = sample_julia(uv, size, center_x, center_y, zoom, max_iter, 
+                              c, bailout, color_offset, color_scale, aa_samples, palette_mode);
+    
+    // Apply color enhancement
+    color = enhance_color(color, brightness, saturation, contrast);
+    
+    // Apply ACES tone mapping
+    color = aces_tonemap(color);
+    
+    // Gamma correction
+    color = pow(color, vec3(1.0 / 2.2));
+    
+    imageStore(image, texelCoord, vec4(color, 1.0));
+}

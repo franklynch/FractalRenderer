@@ -1,0 +1,153 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(push_constant) uniform constants {
+    vec4 data1; // center_x, center_y, zoom, max_iterations
+    vec4 data2; // julia_c_real, julia_c_imag, p, r
+    vec4 data3; // aa_samples, color_scale, brightness, saturation
+    vec4 data4; // contrast, palette_mode, stripe_density, useJuliaFlag
+    vec4 data5; // unused
+} PushConstants;
+
+// ======================================
+// PALETTES
+// ======================================
+vec3 palette_ultra_fire(float t){
+    vec3 c1=vec3(0.0,0.0,0.1);
+    vec3 c2=vec3(0.8,0.0,0.0);
+    vec3 c3=vec3(1.0,0.3,0.0);
+    vec3 c4=vec3(1.0,0.9,0.0);
+    vec3 c5=vec3(1.0,1.0,0.95);
+    t=pow(t,0.7);
+    if(t<0.2) return mix(c1,c2,t*5.0);
+    else if(t<0.4) return mix(c2,c3,(t-0.2)*5.0);
+    else if(t<0.6) return mix(c3,c4,(t-0.4)*5.0);
+    else if(t<0.8) return mix(c4,c5,(t-0.6)*5.0);
+    else return c5;
+}
+
+// Add more palettes here as needed (palette_electric, palette_ocean_enhanced, etc.)
+
+vec3 get_palette_color(float t,int palette_mode){
+    t=fract(t);
+    switch(palette_mode){
+        case 0: return palette_ultra_fire(t);
+        // case 1: return palette_electric(t);
+        // add others here
+        default: return palette_ultra_fire(t);
+    }
+}
+
+// ======================================
+// COLOR ENHANCEMENT
+// ======================================
+vec3 enhance_color(vec3 color,float brightness,float saturation,float contrast){
+    color*=brightness;
+    color=(color-0.5)*contrast+0.5;
+    float gray=dot(color,vec3(0.299,0.587,0.114));
+    color=mix(vec3(gray),color,saturation);
+    return clamp(color,0.0,1.0);
+}
+
+vec3 aces_tonemap(vec3 color){
+    const float a=2.51,b=0.03,c=2.43,d=0.59,e=0.14;
+    return clamp((color*(a*color+b))/(color*(c*color+d)+e),0.0,1.0);
+}
+
+// ======================================
+// PHOENIX ITERATION
+// ======================================
+vec2 phoenix_step(vec2 z,vec2 prev,vec2 c,bool useJulia,vec2 juliaC,float p,float r){
+    float x=z.x*z.x-z.y*z.y+(useJulia?juliaC.x:c.x)+r*prev.x+p*z.x;
+    float y=2.0*z.x*z.y+(useJulia?juliaC.y:c.y)+r*prev.y+p*z.y;
+    return vec2(x,y);
+}
+
+float phoenix_iter(vec2 c,int maxIter,vec2 juliaC,bool useJulia,float p,float r,out vec2 lastZ){
+    vec2 z=vec2(0.0);
+    vec2 prev=vec2(0.0);
+    int i;
+    for(i=0;i<maxIter;i++){
+        vec2 next=phoenix_step(z,prev,c,useJulia,juliaC,p,r);
+        prev=z;
+        z=next;
+        if(dot(z,z)>4.0) break;
+    }
+    lastZ=z;
+    if(i==maxIter) return float(maxIter);
+    float log_zn=log(dot(z,z))/2.0;
+    float nu=log(log_zn/log(2.0))/log(2.0);
+    return float(i)+1.0-nu;
+}
+
+// ======================================
+// PHOENIX SAMPLING WITH FLOW STRIPES
+// ======================================
+vec3 sample_phoenix(vec2 base_uv,ivec2 size){
+    int aa_samples=max(int(PushConstants.data3.x),1);
+    vec3 accumulated_color=vec3(0.0);
+    float pixel_size=1.0/float(size.x);
+    float sample_offset=pixel_size/float(aa_samples);
+
+    for(int sx=0;sx<aa_samples;sx++){
+        for(int sy=0;sy<aa_samples;sy++){
+            vec2 offset=vec2(float(sx),float(sy))*sample_offset-sample_offset*float(aa_samples-1)*0.5;
+            vec2 uv=base_uv+offset/vec2(size);
+
+            float aspect=float(size.x)/float(size.y);
+            vec2 c=vec2(PushConstants.data1.x,PushConstants.data1.y)+vec2(
+                (uv.x-0.5)*PushConstants.data1.z*aspect,
+                (uv.y-0.5)*PushConstants.data1.z
+            );
+
+            int max_iter=int(PushConstants.data1.w);
+            bool useJulia=(PushConstants.data4.w>0.5);
+            float p=PushConstants.data2.z;
+            float r=PushConstants.data2.w;
+
+            vec2 lastZ;
+            float it=phoenix_iter(c,max_iter,PushConstants.data2.xy,useJulia,p,r,lastZ);
+            float t=it/float(max_iter);
+
+            float stripe_density=PushConstants.data4.z;
+            if(stripe_density>0.01){
+                float angle=atan(lastZ.y,lastZ.x);
+                float stripe_mod=0.5+0.5*sin(angle*stripe_density+it);
+                float t2=fract(t+0.1*stripe_mod);
+                vec3 base_color=get_palette_color(t,int(PushConstants.data4.y));
+                vec3 stripe_color=get_palette_color(t2,int(PushConstants.data4.y));
+                base_color=mix(base_color,stripe_color,0.3*stripe_mod);
+                accumulated_color+=base_color;
+            } else {
+                t=PushConstants.data2.w+t*PushConstants.data3.y;
+                accumulated_color+=get_palette_color(t,int(PushConstants.data4.y));
+            }
+        }
+    }
+    return accumulated_color/float(aa_samples*aa_samples);
+}
+
+// ======================================
+// MAIN
+// ======================================
+void main(){
+    ivec2 texelCoord=ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size=imageSize(image);
+    if(texelCoord.x>=size.x || texelCoord.y>=size.y) return;
+
+    vec2 uv=vec2(texelCoord)/vec2(size);
+    vec3 color=sample_phoenix(uv,size);
+
+    float brightness=max(PushConstants.data3.z,0.1);
+    float saturation=max(PushConstants.data3.w,0.0);
+    float contrast=max(PushConstants.data4.x,0.1);
+
+    color=enhance_color(color,brightness,saturation,contrast);
+    color=aces_tonemap(color);
+    color=pow(color,vec3(1.0/2.2));
+
+    imageStore(image,texelCoord,vec4(color,1.0));
+}
