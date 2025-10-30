@@ -86,48 +86,64 @@ float phoenix_iter(vec2 c,int maxIter,vec2 juliaC,bool useJulia,float p,float r,
 // ======================================
 // PHOENIX SAMPLING WITH FLOW STRIPES
 // ======================================
-vec3 sample_phoenix(vec2 base_uv,ivec2 size){
-    int aa_samples=max(int(PushConstants.data3.x),1);
-    vec3 accumulated_color=vec3(0.0);
-    float pixel_size=1.0/float(size.x);
-    float sample_offset=pixel_size/float(aa_samples);
+vec3 sample_phoenix(vec2 base_uv, ivec2 size)
+{
+    int aa_samples = max(int(PushConstants.data3.x), 1);
+    vec3 accumulated_color = vec3(0.0);
+    float pixel_size = 1.0 / float(size.x);
+    float sample_offset = pixel_size / float(aa_samples);
 
-    for(int sx=0;sx<aa_samples;sx++){
-        for(int sy=0;sy<aa_samples;sy++){
-            vec2 offset=vec2(float(sx),float(sy))*sample_offset-sample_offset*float(aa_samples-1)*0.5;
-            vec2 uv=base_uv+offset/vec2(size);
+    // Use data4.z for both stripe density and amplitude
+    float stripe_control = max(PushConstants.data4.z, 0.0);
+    float stripe_density  = stripe_control;
+    float stripe_amplitude = clamp(stripe_control * 0.05, 0.0, 1.0); // auto amplitude scaling
 
-            float aspect=float(size.x)/float(size.y);
-            vec2 c=vec2(PushConstants.data1.x,PushConstants.data1.y)+vec2(
-                (uv.x-0.5)*PushConstants.data1.z*aspect,
-                (uv.y-0.5)*PushConstants.data1.z
+    for (int sx = 0; sx < aa_samples; sx++) {
+        for (int sy = 0; sy < aa_samples; sy++) {
+            vec2 offset = vec2(float(sx), float(sy)) * sample_offset - sample_offset * float(aa_samples - 1) * 0.5;
+            vec2 uv = base_uv + offset / vec2(size);
+
+            float aspect = float(size.x) / float(size.y);
+            vec2 c = vec2(PushConstants.data1.x, PushConstants.data1.y) + vec2(
+                (uv.x - 0.5) * PushConstants.data1.z * aspect,
+                (uv.y - 0.5) * PushConstants.data1.z
             );
 
-            int max_iter=int(PushConstants.data1.w);
-            bool useJulia=(PushConstants.data4.w>0.5);
-            float p=PushConstants.data2.z;
-            float r=PushConstants.data2.w;
+            int max_iter = int(PushConstants.data1.w);
+            bool useJulia = (PushConstants.data4.w > 0.5);
+            float p = PushConstants.data2.z;
+            float r = PushConstants.data2.w;
 
             vec2 lastZ;
-            float it=phoenix_iter(c,max_iter,PushConstants.data2.xy,useJulia,p,r,lastZ);
-            float t=it/float(max_iter);
+            float smooth_iter = phoenix_iter(c, max_iter, PushConstants.data2.xy, useJulia, p, r, lastZ);
+            float t = smooth_iter / float(max_iter);
+            t = pow(t, 0.8); // smoother gradient spread
 
-            float stripe_density=PushConstants.data4.z;
-            if(stripe_density>0.01){
-                float angle=atan(lastZ.y,lastZ.x);
-                float stripe_mod=0.5+0.5*sin(angle*stripe_density+it);
-                float t2=fract(t+0.1*stripe_mod);
-                vec3 base_color=get_palette_color(t,int(PushConstants.data4.y));
-                vec3 stripe_color=get_palette_color(t2,int(PushConstants.data4.y));
-                base_color=mix(base_color,stripe_color,0.3*stripe_mod);
-                accumulated_color+=base_color;
+            vec3 color;
+
+            if (stripe_density > 0.01) {
+                float angle = atan(lastZ.y, lastZ.x);
+
+                // Smooth stripe phase modulation
+                float stripe_mod = 0.5 + 0.5 * sin(angle * stripe_density + smooth_iter * 0.25);
+
+                // Adaptive amplitude fades with iteration smoothness
+                float adaptive_amp = stripe_amplitude * (1.0 - exp(-0.004 * smooth_iter * smooth_iter));
+
+                float t2 = fract(t + 0.1 * stripe_mod);
+                vec3 base_color = get_palette_color(t, int(PushConstants.data4.y));
+                vec3 stripe_color = get_palette_color(t2, int(PushConstants.data4.y));
+
+                color = mix(base_color, stripe_color, adaptive_amp * stripe_mod);
             } else {
-                t=PushConstants.data2.w+t*PushConstants.data3.y;
-                accumulated_color+=get_palette_color(t,int(PushConstants.data4.y));
+                color = get_palette_color(t, int(PushConstants.data4.y));
             }
+
+            accumulated_color += color;
         }
     }
-    return accumulated_color/float(aa_samples*aa_samples);
+
+    return accumulated_color / float(aa_samples * aa_samples);
 }
 
 // ======================================

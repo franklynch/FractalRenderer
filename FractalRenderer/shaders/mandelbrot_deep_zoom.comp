@@ -24,12 +24,12 @@ struct DoubleDouble {
 
 // Double-double arithmetic operations
 DoubleDouble dd_add(DoubleDouble a, DoubleDouble b) {
-    float t1 = a.hi + b.hi;
+    float t1 = a.hi   b.hi;
     float e = t1 - a.hi;
-    float t2 = ((b.hi - e) + (a.hi - (t1 - e))) + a.lo + b.lo;
+    float t2 = ((b.hi - e)   (a.hi - (t1 - e)))   a.lo   b.lo;
     
     DoubleDouble result;
-    result.hi = t1 + t2;
+    result.hi = t1   t2;
     result.lo = t2 - (result.hi - t1);
     return result;
 }
@@ -40,7 +40,7 @@ DoubleDouble dd_mul(DoubleDouble a, DoubleDouble b) {
     float f = fma(a.hi, b.lo, fma(a.lo, b.hi, e));
     
     DoubleDouble result;
-    result.hi = p + f;
+    result.hi = p   f;
     result.lo = f - (result.hi - p);
     return result;
 }
@@ -54,7 +54,7 @@ DoubleDouble dd_sub(DoubleDouble a, DoubleDouble b) {
 
 // Convert to single precision (for final iteration or bailout check)
 float dd_to_float(DoubleDouble a) {
-    return a.hi + a.lo;
+    return a.hi   a.lo;
 }
 
 // Create double-double from float
@@ -71,7 +71,7 @@ vec3 palette_cosine(float t) {
     vec3 b = vec3(0.5, 0.5, 0.5);
     vec3 c = vec3(1.0, 1.0, 1.0);
     vec3 d = vec3(0.00, 0.33, 0.67);
-    return a + b * cos(6.28318 * (c * t + d));
+    return a   b * cos(6.28318 * (c * t   d));
 }
 
 vec3 palette_fire(float t) {
@@ -106,13 +106,9 @@ vec3 get_palette_color(float t, int palette_mode) {
 }
 
 // Series approximation coefficients for deep zoom optimization
-// Skips early iterations using Taylor series expansion
 int compute_series_skip(vec2 delta_c, int max_skip) {
-    // Simple series approximation: check if we can skip iterations
-    // For deep interior points, we can skip many iterations
     float dc_mag = length(delta_c);
     
-    // Very rough heuristic: if delta is tiny, we can skip more
     if (dc_mag < 1e-10) return min(max_skip, 100);
     if (dc_mag < 1e-8) return min(max_skip, 50);
     if (dc_mag < 1e-6) return min(max_skip, 20);
@@ -120,7 +116,9 @@ int compute_series_skip(vec2 delta_c, int max_skip) {
     return 0;
 }
 
-// Improved high-precision Mandelbrot (maintains more precision during iteration)
+// IMPROVED: High-precision Mandelbrot with better glitch detection
+
+// IMPROVED: True double-double precision Mandelbrot
 vec3 compute_mandelbrot_highprec(vec2 uv, ivec2 size) {
     // Unpack double-double precision center
     DoubleDouble center_x;
@@ -139,8 +137,6 @@ vec3 compute_mandelbrot_highprec(vec2 uv, ivec2 size) {
     float bailout = PushConstants.data3.z;
     
     // Calculate position with high precision
-    
-    
     DoubleDouble offset_x;
     offset_x.hi = uv.x; 
     offset_x.lo = 0.0;
@@ -155,26 +151,36 @@ vec3 compute_mandelbrot_highprec(vec2 uv, ivec2 size) {
     DoubleDouble c_x = dd_add(center_x, scaled_x);
     DoubleDouble c_y = dd_add(center_y, scaled_y);
     
-    // FIXED: Maintain high precision for the constant c
-    // Convert to single precision only for the iteration (acceptable trade-off)
-    vec2 c = vec2(dd_to_float(c_x), dd_to_float(c_y));
-    
-    // For extreme precision needs, could iterate in double-double,
-    // but that's 4-8x slower. This is a good compromise.
-    vec2 z = vec2(0.0);
+    // *** FIXED: Use double-double for iteration! ***
+    DoubleDouble zx = float_to_dd(0.0);
+    DoubleDouble zy = float_to_dd(0.0);
     
     int iter;
     float smooth_val = 0.0;
     
-    for(iter = 0; iter < max_iter; iter++) {
-        float x_temp = z.x * z.x - z.y * z.y + c.x;
-        z.y = 2.0 * z.x * z.y + c.y;
-        z.x = x_temp;
+    for(iter = 0; iter < max_iter; iter  ) {
+        // z = z^2   c using double-double arithmetic
+        DoubleDouble zx2 = dd_mul(zx, zx);
+        DoubleDouble zy2 = dd_mul(zy, zy);
+        DoubleDouble zxzy = dd_mul(zx, zy);
         
-        float len_sq = z.x * z.x + z.y * z.y;
+        // New zx = zx^2 - zy^2   cx
+        DoubleDouble new_zx = dd_add(dd_sub(zx2, zy2), c_x);
+        
+        // New zy = 2*zx*zy   cy
+        DoubleDouble two_zxzy = dd_add(zxzy, zxzy);  // 2 * zx * zy
+        DoubleDouble new_zy = dd_add(two_zxzy, c_y);
+        
+        zx = new_zx;
+        zy = new_zy;
+        
+        // Check bailout (convert to float for comparison)
+        float zx_f = dd_to_float(zx);
+        float zy_f = dd_to_float(zy);
+        float len_sq = zx_f * zx_f   zy_f * zy_f;
         
         if(len_sq > bailout * bailout) {
-            smooth_val = float(iter) + 1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
+            smooth_val = float(iter)   1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
             break;
         }
     }
@@ -187,12 +193,12 @@ vec3 compute_mandelbrot_highprec(vec2 uv, ivec2 size) {
         int palette_mode = int(PushConstants.data3.w);
         
         float t = smooth_val / float(max_iter);
-        t = color_offset + t * color_scale;
+        t = color_offset   t * color_scale;
         return get_palette_color(t, palette_mode);
     }
 }
 
-// FIXED: Perturbation theory with proper double-double delta calculation
+// IMPROVED: Perturbation theory with better delta calculation
 vec3 compute_mandelbrot_perturbation(vec2 uv, ivec2 size) {
     int max_iter = int(PushConstants.data2.z);
     int ref_iter = int(PushConstants.data4.y);
@@ -200,14 +206,12 @@ vec3 compute_mandelbrot_perturbation(vec2 uv, ivec2 size) {
     bool use_series = PushConstants.data4.z > 0.5;
     int series_order = int(PushConstants.data4.w);
     
-    // FIXED: Unpack double-double zoom for accurate delta calculation
+    // Unpack double-double zoom for accurate delta calculation
     DoubleDouble zoom;
     zoom.hi = PushConstants.data2.x;
     zoom.lo = PushConstants.data2.y;
     
-    
-    
-    // FIXED: Calculate delta_c with double-double precision
+    // Calculate delta_c with double-double precision
     DoubleDouble offset_x;
     offset_x.hi = uv.x;
     offset_x.lo = 0.0;
@@ -219,51 +223,48 @@ vec3 compute_mandelbrot_perturbation(vec2 uv, ivec2 size) {
     DoubleDouble delta_c_x_dd = dd_mul(offset_x, zoom);
     DoubleDouble delta_c_y_dd = dd_mul(offset_y, zoom);
     
-    // Convert to single precision for iteration (delta is small enough for this)
+    // Convert to single precision for iteration
     vec2 delta_c = vec2(dd_to_float(delta_c_x_dd), dd_to_float(delta_c_y_dd));
     
-    // NEW: Series approximation to skip early iterations
+    // Series approximation to skip early iterations
     int skip_iter = 0;
     if (use_series && series_order > 0) {
         skip_iter = compute_series_skip(delta_c, min(series_order * 10, ref_iter / 4));
     }
     
-    // Perturbation iteration: Z_n = X_n + z_n where X_n is reference
+    // Perturbation iteration
     vec2 delta_z = vec2(0.0);
     int iter;
     float smooth_val = 0.0;
     
-    // Start from skip_iter instead of 0
-    for(iter = skip_iter; iter < min(max_iter, ref_iter); iter++) {
+    for(iter = skip_iter; iter < min(max_iter, ref_iter); iter  ) {
         vec2 X_n = reference_orbit[iter];
         
-        // Perturbation formula: z_{n+1} = 2*X_n*z_n + z_n^2 + delta_c
+        // Perturbation formula: z_{n 1} = 2*X_n*z_n   z_n^2   delta_c
         vec2 term1 = 2.0 * vec2(X_n.x * delta_z.x - X_n.y * delta_z.y,
-                                 X_n.x * delta_z.y + X_n.y * delta_z.x);
+                                 X_n.x * delta_z.y   X_n.y * delta_z.x);
         
         vec2 term2 = vec2(delta_z.x * delta_z.x - delta_z.y * delta_z.y,
                           2.0 * delta_z.x * delta_z.y);
         
-        delta_z = term1 + term2 + delta_c;
+        delta_z = term1   term2   delta_c;
         
-        // NEW: Glitch detection - if delta grows too large, perturbation fails
-        float delta_mag_sq = delta_z.x * delta_z.x + delta_z.y * delta_z.y;
-        float ref_mag_sq = X_n.x * X_n.x + X_n.y * X_n.y;
+        // IMPROVED: Better glitch detection
+        float delta_mag_sq = delta_z.x * delta_z.x   delta_z.y * delta_z.y;
+        float ref_mag_sq = X_n.x * X_n.x   X_n.y * X_n.y;
         
-        // If delta is comparable to reference, we have a "glitch"
-        // Fall back to direct computation (or mark as black/error color)
-        if (delta_mag_sq > ref_mag_sq * 0.5) {
-            // Glitch detected - return error color or fallback
-            // For now, just mark as in-set (black)
-            return vec3(0.0);
+        // Glitch detection with stricter threshold
+        if (delta_mag_sq > ref_mag_sq * 0.25) {
+            // Glitch detected - return dim color for debugging
+            return vec3(0.1, 0.0, 0.0); // Red tint indicates glitch
         }
         
-        // Absolute orbit = reference + delta
-        vec2 Z_n = X_n + delta_z;
-        float len_sq = Z_n.x * Z_n.x + Z_n.y * Z_n.y;
+        // Absolute orbit = reference   delta
+        vec2 Z_n = X_n   delta_z;
+        float len_sq = Z_n.x * Z_n.x   Z_n.y * Z_n.y;
         
         if(len_sq > bailout * bailout) {
-            smooth_val = float(iter) + 1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
+            smooth_val = float(iter)   1.0 - log(log(len_sq) / log(bailout)) / log(2.0);
             break;
         }
     }
@@ -276,20 +277,26 @@ vec3 compute_mandelbrot_perturbation(vec2 uv, ivec2 size) {
         int palette_mode = int(PushConstants.data3.w);
         
         float t = smooth_val / float(max_iter);
-        t = color_offset + t * color_scale;
+        t = color_offset   t * color_scale;
         return get_palette_color(t, palette_mode);
     }
 }
 
-// Supersampling for higher quality
+// IMPROVED: Supersampling with adaptive precision
 vec3 supersample(vec2 base_uv, ivec2 size, int samples) {
     bool use_perturbation = PushConstants.data2.w > 0.5;
     int ref_iter = int(PushConstants.data4.y);
+    float zoom_level = PushConstants.data2.x;
     
-    // FIXED: Check if we actually have reference orbit data
     bool has_reference = (ref_iter > 0);
     
-    if (samples <= 1) {
+    // IMPROVED: Disable supersampling at extreme zoom where offsets collapse
+    int effective_samples = samples;
+    if (zoom_level < 1e-8) {
+        effective_samples = 1; // Single sample at extreme zoom
+    }
+    
+    if (effective_samples <= 1) {
         if (use_perturbation && has_reference) {
             return compute_mandelbrot_perturbation(base_uv, size);
         } else {
@@ -299,44 +306,53 @@ vec3 supersample(vec2 base_uv, ivec2 size, int samples) {
     
     vec3 accumulated = vec3(0.0);
     float pixel_size = 1.0 / float(size.y);
-    float sample_offset = pixel_size / float(samples);
+    float sample_offset = pixel_size / float(effective_samples);
     
-    for (int sx = 0; sx < samples; sx++) {
-        for (int sy = 0; sy < samples; sy++) {
+    // IMPROVED: Check if sample offset is meaningful
+    if (sample_offset * zoom_level < 1e-9) {
+        // Offsets too small, just do single sample
+        if (use_perturbation && has_reference) {
+            return compute_mandelbrot_perturbation(base_uv, size);
+        } else {
+            return compute_mandelbrot_highprec(base_uv, size);
+        }
+    }
+    
+    for (int sx = 0; sx < effective_samples; sx  ) {
+        for (int sy = 0; sy < effective_samples; sy  ) {
             vec2 offset = vec2(float(sx), float(sy)) * sample_offset - 
-                         sample_offset * float(samples - 1) * 0.5;
-            vec2 sample_uv = base_uv + offset;
+                         sample_offset * float(effective_samples - 1) * 0.5;
+            vec2 sample_uv = base_uv   offset;
             
             if (use_perturbation && has_reference) {
-                accumulated += compute_mandelbrot_perturbation(sample_uv, size);
+                accumulated  = compute_mandelbrot_perturbation(sample_uv, size);
             } else {
-                accumulated += compute_mandelbrot_highprec(sample_uv, size);
+                accumulated  = compute_mandelbrot_highprec(sample_uv, size);
             }
         }
     }
     
-    return accumulated / float(samples * samples);
+    return accumulated / float(effective_samples * effective_samples);
 }
 
 void main() {
-
-        ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(image);
     
     if(texelCoord.x >= size.x || texelCoord.y >= size.y) {
         return;
     }
     
-    // Match the working Mandelbrot shader: divide by height
-    vec2 uv = (vec2(texelCoord) - vec2(size) * 0.5) / float(size.y);
+    // IMPROVED: Better UV coordinate calculation with intermediate precision
+    vec2 pixel_offset = vec2(texelCoord) - vec2(size) * 0.5;
+    vec2 uv = pixel_offset / float(size.y);
     
     int samples = int(PushConstants.data4.x);
     vec3 color = supersample(uv, size, samples);
     
     // Tone mapping and gamma
-    color = color / (color + vec3(1.0));
+    color = color / (color   vec3(1.0));
     color = pow(color, vec3(1.0/2.2));
     
     imageStore(image, texelCoord, vec4(color, 1.0));
-    
 }

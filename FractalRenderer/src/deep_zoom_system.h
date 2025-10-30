@@ -1,58 +1,76 @@
-﻿#pragma once
+﻿// deep_zoom_system.h
+// Deep zoom system with high-precision support for extreme zoom levels
 
-#include "vk_types.h"
-#include <vector>
+#pragma once
 #include <complex>
+#include <vector>
 #include <string>
+#include <vulkan/vulkan.h>
+#include "vk/vk_mem_alloc.h"
+#include "vk/vk_types.h"
+#include "high_precision_math.h"
 
-// ArbitraryFloat - high-precision floating point (mantissa + exponent)
-struct ArbitraryFloat {
-    double mantissa;  // Mantissa (significand)
-    int exponent;     // Power of 10 exponent
+struct FractalState;
 
-    ArbitraryFloat() : mantissa(1.0), exponent(0) {}
-    ArbitraryFloat(double value);
-    ArbitraryFloat(double m, int e) : mantissa(m), exponent(e) {}
+// ============================================================================
+// Precision Mode Enum
+// ============================================================================
+enum class PrecisionMode {
+    Double,        // Standard double precision (zoom > 1e-14)
+    Quad,          // MPFR 128-bit precision (zoom 1e-30 to 1e-14)
+    Arbitrary      // MPFR dynamic precision (zoom < 1e-30)
+};
 
-    // ✅ FIXED: Use to_double() not toDouble()
+// ============================================================================
+// Arbitrary Precision Float
+// ============================================================================
+class ArbitraryFloat {
+public:
+    double mantissa;
+    int exponent;
+
+    ArbitraryFloat(double value = 0.0);
+    ArbitraryFloat(const HighPrecisionFloat& hp);
+
     double to_double() const;
+    HighPrecisionFloat to_high_precision(int bits = 128) const;
+
     void normalize();
 
     ArbitraryFloat operator+(const ArbitraryFloat& other) const;
     ArbitraryFloat operator-(const ArbitraryFloat& other) const;
     ArbitraryFloat operator*(const ArbitraryFloat& other) const;
     ArbitraryFloat operator/(const ArbitraryFloat& other) const;
-};
 
-// Double-Double precision (split into hi/lo parts)
-struct DoubleDouble {
-    double hi;  // High part
-    double lo;  // Low part (error/remainder)
-
-    DoubleDouble() : hi(0.0), lo(0.0) {}
-    DoubleDouble(double h, double l) : hi(h), lo(l) {}
-
-    static DoubleDouble from_double(double d) {
-        return DoubleDouble(d, 0.0);
+    std::pair<float, float> to_double_double() const {
+        double val = to_double();
+        float hi = static_cast<float>(val);
+        float lo = static_cast<float>(val - static_cast<double>(hi));
+        return { hi, lo };
     }
+
+    
+
 };
 
-// Reference orbit point for perturbation theory
+// ============================================================================
+// Reference Orbit Buffer
+// ============================================================================
 struct ReferenceOrbitPoint {
-    std::complex<double> value;  // Complex value at this iteration
-    int iteration;               // Iteration number
+    std::complex<double> value;
+    int iteration;
 };
 
-// GPU buffer for reference orbit
-struct ReferenceOrbitBuffer {
-    // ✅ FIXED: Use cpu_data not orbit
-    std::vector<ReferenceOrbitPoint> cpu_data;
 
+
+class ReferenceOrbitBuffer {
+public:
+    std::vector<ReferenceOrbitPoint> cpu_data;
     AllocatedBuffer gpu_buffer;
     bool is_dirty = true;
 
-    void resize(size_t size) {
-        cpu_data.resize(size);
+    void resize(size_t new_size) {
+        cpu_data.resize(new_size);
         is_dirty = true;
     }
 
@@ -60,89 +78,106 @@ struct ReferenceOrbitBuffer {
     void destroy(VkDevice device, VmaAllocator allocator);
 };
 
-// Deep zoom state
+// ============================================================================
+// Zoom Animation
+// ============================================================================
+struct ZoomKeyframe {
+    ArbitraryFloat center_x{ 0.0 };
+    ArbitraryFloat center_y{ 0.0 };
+    ArbitraryFloat zoom{ 1.0 };
+    float duration = 0.0f;
+};
+
+// ============================================================================
+// Deep Zoom State
+// ============================================================================
 struct DeepZoomState {
-    // High-precision center coordinates
     ArbitraryFloat center_x;
     ArbitraryFloat center_y;
     ArbitraryFloat zoom;
 
-    // Rendering parameters
-    int max_iterations = 1024;
-    int samples_per_pixel = 1;
+    int max_iterations = 1000;
+    float bailout = 256.0f;
 
-    // Perturbation theory settings
     bool use_perturbation = true;
     int reference_iterations = 0;
+    int deep_zoom_iterations = 0;
 
-    // Series approximation settings
-    bool use_series_approximation = false;
-    int series_order = 4;
+    bool use_series_approximation = true;
+    int series_order = 10;
 
-    // ✅ NEW: Animation state (expected by ui_manager.cpp)
+    int samples_per_pixel = 1;
+
+    float color_offset = 0.0f;
+    float color_scale = 1.0f;
+    int palette_mode = 0;
+
     bool zoom_animating = false;
     float zoom_progress = 0.0f;
 
-    // ✅ NEW: Status info (expected by ui_manager.cpp)
-    int zoom_depth_level = 0;           // 0=shallow, 1=moderate, 2=deep, 3=extreme
-    int deep_zoom_iterations = 0;       // Actual iterations used
-    float estimated_render_time = 0.0f; // Estimated render time in ms
+    int zoom_depth_level = 0;
+    float estimated_render_time = 0.0f;
 
-    DeepZoomState()
-        : center_x(0.0), center_y(0.0), zoom(1.0) {
-    }
+    // High-precision support
+    PrecisionMode precision_mode = PrecisionMode::Double;
+    int precision_bits = 64;
+    bool high_precision_enabled = false;
 };
 
-// Zoom path keyframe
-struct ZoomKeyframe {
-    ArbitraryFloat center_x;
-    ArbitraryFloat center_y;
-    ArbitraryFloat zoom;
-    float duration;  // Duration to reach this keyframe
-};
-
-// Deep zoom manager
+// ============================================================================
+// Deep Zoom Manager
+// ============================================================================
 class DeepZoomManager {
 public:
     DeepZoomManager(VkDevice device, VmaAllocator allocator);
     ~DeepZoomManager();
 
-    // ✅ NEW: Initialize (expected by vk_engine.cpp)
     void initialize();
-
-    // Update and render
     void update(float delta_time);
-    void compute_reference_orbit();
 
-    // ✅ NEW: Animation methods (expected by vk_engine.cpp)
     void playZoomPath(const std::vector<ZoomKeyframe>& path);
-    void zoomTo(const ArbitraryFloat& target_x, const ArbitraryFloat& target_y,
-        const ArbitraryFloat& target_zoom, float duration);
+    void zoomTo(const ArbitraryFloat& target_x,
+        const ArbitraryFloat& target_y,
+        const ArbitraryFloat& target_zoom,
+        float duration = 5.0f);
 
-    // ✅ NEW: Export coordinates (expected by vk_engine.cpp)
     std::string exportCoordinates() const;
 
-    // State management
+    // Reference orbit computation
+    void compute_reference_orbit();
+    void compute_reference_orbit_high_precision();
+
+    void set_fractal_state(FractalState* state_ptr) {
+        _fractal_state = state_ptr;
+    }
+
+    // Precision mode management
+    void update_precision_mode();
+    PrecisionMode get_precision_mode() const { return state.precision_mode; }
+
     DeepZoomState state;
     ReferenceOrbitBuffer reference_orbit;
-
-    // Mark dirty when state changes
-    void mark_dirty() { reference_orbit.is_dirty = true; }
 
 private:
     VkDevice _device;
     VmaAllocator _allocator;
 
-    // Animation state
     std::vector<ZoomKeyframe> _zoom_path;
-    int _current_keyframe = 0;
+    size_t _current_keyframe = 0;
     float _animation_time = 0.0f;
 
     void update_animation(float delta_time);
     void interpolate_to_keyframe(int index, float t);
+
+    int calculate_required_precision_bits() const;
+
+    FractalState* _fractal_state = nullptr;
+
 };
 
-// ✅ NEW: Deep zoom presets (expected by vk_engine.cpp)
+// ============================================================================
+// Preset Deep Zoom Locations
+// ============================================================================
 namespace DeepZoomPresets {
     ZoomKeyframe createSeahorseZoom();
     ZoomKeyframe createElephantZoom();

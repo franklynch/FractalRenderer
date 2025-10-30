@@ -388,6 +388,7 @@ void UIManager::draw_fractal_type_selector(FractalType& current_type) {
             if (clicked && current_type != type) {
                 current_type = type;
                 state.mark_dirty();
+             
 
                 // Trigger callback with error handling
                 safe_invoke(on_fractal_type_changed,
@@ -413,14 +414,7 @@ void UIManager::draw_fractal_type_selector(FractalType& current_type) {
     }
 }
 
-// File continues in Part 2...
-// ============================================================================
-// ui_manager.cpp - Part 2: View Controls and Callbacks
-// ============================================================================
 
-// ============================================================================
-// View Controls
-// ============================================================================
 
 void UIManager::draw_view_controls() {
     if (ImGui::CollapsingHeader("View Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -442,9 +436,7 @@ void UIManager::draw_view_controls() {
     }
 }
 
-// ============================================================================
-// Rendering Settings
-// ============================================================================
+
 
 void UIManager::draw_rendering_settings() {
     if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -474,9 +466,6 @@ void UIManager::draw_rendering_settings() {
     }
 }
 
-// ============================================================================
-// Color Palette
-// ============================================================================
 
 void UIManager::draw_color_palette() {
     if (ImGui::CollapsingHeader("Color Palette", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -545,9 +534,7 @@ void UIManager::draw_color_palette() {
     }
 }
 
-// ============================================================================
-// Advanced Effects
-// ============================================================================
+
 
 void UIManager::draw_advanced_effects() {
     if (ImGui::CollapsingHeader("Advanced Effects")) {
@@ -578,9 +565,7 @@ void UIManager::draw_advanced_effects() {
     }
 }
 
-// ============================================================================
-// Performance Info
-// ============================================================================
+
 
 void UIManager::draw_performance_info() {
     if (ImGui::CollapsingHeader("Performance & Info")) {
@@ -600,9 +585,7 @@ void UIManager::draw_performance_info() {
     }
 }
 
-// ============================================================================
-// High-Resolution Export (Using class members instead of static variables)
-// ============================================================================
+
 
 void UIManager::draw_high_res_export() {
     if (ImGui::CollapsingHeader("High-Resolution Export")) {
@@ -671,9 +654,7 @@ void UIManager::draw_high_res_export() {
     }
 }
 
-// ============================================================================
-// Deep Zoom Controls (ALL using callbacks now)
-// ============================================================================
+
 
 void UIManager::draw_deep_zoom_controls(DeepZoomManager* deep_zoom) {
     if (!deep_zoom) return;
@@ -775,16 +756,6 @@ void UIManager::draw_deep_zoom_controls(DeepZoomManager* deep_zoom) {
     }
 }
 
-// Fractal-specific controls (Julia, Mandelbulb, Phoenix) continue in Part 3...
-// Animation window continues in Part 3...
-
-// ============================================================================
-// ui_manager.cpp - Part 3: Animation Controls (ALL using callbacks)
-// ============================================================================
-
-// ============================================================================
-// Animation Window
-// ============================================================================
 
 void UIManager::draw_animation_window(AnimationSystem* anim_system,
     AnimationRenderer* anim_renderer,
@@ -826,9 +797,7 @@ void UIManager::draw_animation_window(AnimationSystem* anim_system,
     ImGui::End();
 }
 
-// ============================================================================
-// Animation Playback Controls (ALL using callbacks)
-// ============================================================================
+
 
 void UIManager::draw_animation_playback_controls(AnimationSystem* anim_system,
     const std::vector<Keyframe>& keyframes) {
@@ -932,9 +901,6 @@ void UIManager::draw_animation_playback_controls(AnimationSystem* anim_system,
     }
 }
 
-// ============================================================================
-// Keyframe Management (ALL using callbacks)
-// ============================================================================
 
 void UIManager::draw_animation_keyframe_management(AnimationSystem* anim_system,
     const std::vector<Keyframe>& keyframes) {
@@ -1053,9 +1019,7 @@ void UIManager::draw_animation_keyframe_management(AnimationSystem* anim_system,
     }
 }
 
-// ============================================================================
-// Animation Export Settings
-// ============================================================================
+
 
 void UIManager::draw_animation_export_settings(Animation& animation, AnimationSystem* anim_system) {
     ImGui::Spacing();
@@ -1105,9 +1069,7 @@ void UIManager::draw_animation_export_settings(Animation& animation, AnimationSy
         animation.export_width, animation.export_height, animation.target_fps);
 }
 
-// ============================================================================
-// Video Encoding Settings (Using class members instead of static)
-// ============================================================================
+
 
 void UIManager::draw_video_encoding_settings(Animation& animation, AnimationRenderer* anim_renderer) {
     ImGui::SeparatorText("Video Encoding");
@@ -1202,14 +1164,6 @@ void UIManager::draw_video_encoding_settings(Animation& animation, AnimationRend
     }
 }
 
-// ============================================================================
-// Animation Render Progress
-// ============================================================================
-
-// ============================================================================
-// CORRECTED: Animation Render Progress (matches actual RenderProgress struct)
-// ============================================================================
-
 void UIManager::draw_animation_render_progress(AnimationRenderer* anim_renderer) {
     if (!anim_renderer || !anim_renderer->is_rendering()) return;
 
@@ -1245,9 +1199,6 @@ void UIManager::draw_animation_render_progress(AnimationRenderer* anim_renderer)
     }
 }
 
-// ============================================================================
-// Animation Help
-// ============================================================================
 
 void UIManager::draw_animation_help() {
     if (ImGui::CollapsingHeader("📖 Help")) {
@@ -1268,16 +1219,8 @@ void UIManager::draw_animation_help() {
     }
 }
 
-// Remaining helper functions (minimap, status bar, help overlay, presets) 
-// continue in Part 4...
 
-// ============================================================================
-// ui_manager.cpp - Part 4: Helper Functions and Fractal-Specific Controls
-// ============================================================================
 
-// ============================================================================
-// Fractal-Specific Controls
-// ============================================================================
 
 void UIManager::draw_fractal_specific_controls(FractalType type) {
     if (type == FractalType::JuliaSet) {
@@ -1482,18 +1425,23 @@ void UIManager::draw_phoenix_controls() {
     }
 }
 
-// ============================================================================
-// Preset Window
-// ============================================================================
+
 
 void UIManager::draw_preset_window(FractalType current_type) {
+
+
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 260, 10), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(UIConstants::PRESET_WINDOW_WIDTH, 0), ImGuiCond_FirstUseEver);
+        
+    
 
-    if (!ImGui::Begin("Preset Locations", nullptr, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::End();
-        return;
-    }
+    if (!ImGui::Begin("Preset Locations", nullptr, ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::End();
+    return;
+
+}   
+
+    
 
     if (current_type == FractalType::Mandelbrot) {
         ImGui::Text("Mandelbrot Locations:");
@@ -1544,9 +1492,7 @@ void UIManager::draw_preset_window(FractalType current_type) {
     ImGui::End();
 }
 
-// ============================================================================
-// Minimap
-// ============================================================================
+
 
 void UIManager::draw_minimap() {
     ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 160));
@@ -1591,9 +1537,6 @@ void UIManager::draw_minimap() {
     ImGui::End();
 }
 
-// ============================================================================
-// Status Bar
-// ============================================================================
 
 void UIManager::draw_status_bar(FractalType current_type, float fps, int width, int height) {
     ImGuiIO& io = ImGui::GetIO();
@@ -1641,9 +1584,7 @@ void UIManager::draw_status_bar(FractalType current_type, float fps, int width, 
     ImGui::End();
 }
 
-// ============================================================================
-// Help Overlay
-// ============================================================================
+
 
 void UIManager::draw_help_overlay() {
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
@@ -1696,9 +1637,3 @@ void UIManager::draw_help_overlay() {
     ImGui::End();
 }
 
-// ============================================================================
-// End of ui_manager.cpp
-// ============================================================================
-
-// Note: This completes the improved UI Manager implementation.
-// Combine all parts (1-4) into a single ui_manager.cpp file.

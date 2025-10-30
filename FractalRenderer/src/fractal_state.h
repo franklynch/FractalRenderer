@@ -1,14 +1,15 @@
-#pragma once
+﻿#pragma once
 #include <glm/glm.hpp>
+#include "high_precision_math.h"  // ← ADDED for high-precision support
 
 // Centralized fractal state management
 enum class FractalType {
     Mandelbrot = 0,
-    JuliaSet,  
-    BurningShip, 
-    Mandelbulb, 
-    Phoenix, 
-    Deep_Zoom, 
+    JuliaSet,
+    BurningShip,
+    Mandelbulb,
+    Phoenix,
+    Deep_Zoom,
     Count
 };
 
@@ -81,7 +82,6 @@ struct FractalState {
     float phoenix_p = 0.0f;          // Damping parameter
     float phoenix_r = -0.5f;         // Feedback/memory parameter
     bool use_julia_set = false;      // Toggle Julia mode
-    // float stripe_density = 0.0f;     // Flow stripe visualization (0 = off)
 
     // Deep Zoom parameters
     bool use_perturbation = false;         // Enable perturbation theory
@@ -90,7 +90,46 @@ struct FractalState {
     int series_order = 3;                  // Series approximation order
     int samples_per_pixel = 1;             // Supersampling (1, 2, or 4)
 
-    
+    // ============================================================================
+    // *** NEW: HIGH-PRECISION COORDINATE STORAGE FOR DEEP ZOOM ***
+    // ============================================================================
+    struct HighPrecisionCoords {
+        HighPrecisionFloat center_x;
+        HighPrecisionFloat center_y;
+        HighPrecisionFloat zoom;
+        bool is_valid = false;
+        int precision_bits = 128;
+
+        // *** FIXED: Constructor with explicit mpfr_prec_t cast ***
+        HighPrecisionCoords()
+            : center_x(static_cast<mpfr_prec_t>(128))
+            , center_y(static_cast<mpfr_prec_t>(128))
+            , zoom(static_cast<mpfr_prec_t>(128))
+            , is_valid(false)
+            , precision_bits(128) {
+        }
+    } hp_coords;
+
+    // Helper to sync between double and high-precision
+    void update_hp_from_double(int precision_bits = 128) {
+        hp_coords.center_x = HighPrecisionFloat(center_x, static_cast<mpfr_prec_t>(precision_bits));
+        hp_coords.center_y = HighPrecisionFloat(center_y, static_cast<mpfr_prec_t>(precision_bits));
+        hp_coords.zoom = HighPrecisionFloat(zoom, static_cast<mpfr_prec_t>(precision_bits));
+        hp_coords.precision_bits = precision_bits;
+        hp_coords.is_valid = true;
+    }
+
+    void update_double_from_hp() {
+        if (hp_coords.is_valid) {
+            center_x = hp_coords.center_x.to_double();
+            center_y = hp_coords.center_y.to_double();
+            zoom = hp_coords.zoom.to_double();
+        }
+    }
+
+    void invalidate_hp() {
+        hp_coords.is_valid = false;
+    }
 
     // Reset to default view
     void reset() {
@@ -107,13 +146,16 @@ struct FractalState {
         color_saturation = 1.0f;
         color_contrast = 1.0f;
 
+        // Invalidate high-precision coordinates
+        invalidate_hp();
+
         mark_dirty();
     }
 
     // Helper: Get fractal type name
     static const char* get_name(FractalType type) {
         static const char* names[] = {
-			"Mandelbrot", "Julia Set", "Burning Ship", "Mandelbulb", "Phoenix", "Deep_Zoom"
+            "Mandelbrot", "Julia Set", "Burning Ship", "Mandelbulb", "Phoenix", "Deep_Zoom"
         };
         return names[static_cast<int>(type)];
     }

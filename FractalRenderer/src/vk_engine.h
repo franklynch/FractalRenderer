@@ -164,6 +164,8 @@ public:
 	//initializes everything in the engine
 	void init();
 
+	void initialize_deep_zoom();
+
 	//shuts down the engine
 	void cleanup();
 

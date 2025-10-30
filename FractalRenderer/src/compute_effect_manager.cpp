@@ -131,7 +131,7 @@ void ComputeEffectManager::init_pipelines()
 
     // Create deep zoom pipeline (use deep zoom layout)
     init_effect(FractalType::Deep_Zoom,
-        "shaders/mandelbrot_deep_zoom.comp.spv",
+        "shaders/test_deep_zoom.comp.spv",
         true);  // ← Uses deep zoom layout!
 
     fmt::print("ComputeEffectManager: All pipelines initialized\n");

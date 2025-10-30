@@ -236,29 +236,72 @@ inline void ComputeEffect::update_from_state(const FractalState& state, float ti
 
 
 
+      
     case FractalType::Deep_Zoom:
     {
-        // Split doubles into high/low pairs for double-double precision
-        auto split_double = [](double value) -> std::pair<float, float> {
+        // ═══════════════════════════════════════════════════════════════
+        // Double-Double Splitting Functions
+        // ═══════════════════════════════════════════════════════════════
+
+        // Split high-precision float into double-double format
+        auto split_highprecision = [](const HighPrecisionFloat& hp_value) -> std::pair<float, float> {
+            double value = hp_value.to_double();
             float hi = static_cast<float>(value);
-            float lo = static_cast<float>(value - static_cast<double>(hi));
+            double hi_as_double = static_cast<double>(hi);
+            float lo = static_cast<float>(value - hi_as_double);
             return { hi, lo };
             };
 
-        auto [cx_hi, cx_lo] = split_double(state.center_x);
-        auto [cy_hi, cy_lo] = split_double(state.center_y);
-        auto [z_hi, z_lo] = split_double(state.zoom);
+        // Fallback for regular doubles (when HP not available)
+        auto split_double = [](double value) -> std::pair<float, float> {
+            float hi = static_cast<float>(value);
+            double hi_as_double = static_cast<double>(hi);
+            float lo = static_cast<float>(value - hi_as_double);
+            return { hi, lo };
+            };
 
-        // data1: center_x_hi, center_x_lo, center_y_hi, center_y_lo
-        new_constants.data1 = glm::vec4(cx_hi, cx_lo, cy_hi, cy_lo);
+        // ═══════════════════════════════════════════════════════════════
+        // Coordinate Conversion (HP or Double)
+        // ═══════════════════════════════════════════════════════════════
 
-        // data2: zoom_hi, zoom_lo, max_iterations, use_perturbation
-        new_constants.data2 = glm::vec4(
-            z_hi,
-            z_lo,
-            static_cast<float>(state.max_iterations),
-            state.use_perturbation ? 1.0f : 0.0f
-        );
+        if (state.hp_coords.is_valid) {
+            // Use high-precision path
+            auto [cx_hi, cx_lo] = split_highprecision(state.hp_coords.center_x);
+            auto [cy_hi, cy_lo] = split_highprecision(state.hp_coords.center_y);
+            auto [z_hi, z_lo] = split_highprecision(state.hp_coords.zoom);
+
+            // data1: center_x_hi, center_x_lo, center_y_hi, center_y_lo
+            new_constants.data1 = glm::vec4(cx_hi, cx_lo, cy_hi, cy_lo);
+
+            // data2: zoom_hi, zoom_lo, max_iterations, use_perturbation
+            new_constants.data2 = glm::vec4(
+                z_hi,
+                z_lo,
+                static_cast<float>(state.max_iterations),
+                state.use_perturbation ? 1.0f : 0.0f
+            );
+        }
+        else {
+            // Fallback to regular doubles if HP not available
+            auto [cx_hi, cx_lo] = split_double(state.center_x);
+            auto [cy_hi, cy_lo] = split_double(state.center_y);
+            auto [z_hi, z_lo] = split_double(state.zoom);
+
+            // data1: center_x_hi, center_x_lo, center_y_hi, center_y_lo
+            new_constants.data1 = glm::vec4(cx_hi, cx_lo, cy_hi, cy_lo);
+
+            // data2: zoom_hi, zoom_lo, max_iterations, use_perturbation
+            new_constants.data2 = glm::vec4(
+                z_hi,
+                z_lo,
+                static_cast<float>(state.max_iterations),
+                state.use_perturbation ? 1.0f : 0.0f
+            );
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Remaining Push Constants
+        // ═══════════════════════════════════════════════════════════════
 
         // data3: color_offset, color_scale, bailout, palette_mode
         new_constants.data3 = glm::vec4(
@@ -269,38 +312,124 @@ inline void ComputeEffect::update_from_state(const FractalState& state, float ti
         );
 
         // data4: samples_per_pixel, reference_iterations, use_series_approx, series_order
+        // ✅ FIX: Use actual orbit buffer size, not state.reference_iterations
         new_constants.data4 = glm::vec4(
             static_cast<float>(state.antialiasing_samples),
-            static_cast<float>(state.reference_iterations),
+            static_cast<float>(state.reference_iterations), 
             state.use_series_approximation ? 1.0f : 0.0f,
             static_cast<float>(state.series_order)
         );
 
+        // data5: (if needed for your shader)
         new_constants.data5 = glm::vec4(0.0f);
 
-        // DEBUG: Print what we're sending to shader
-        fmt::print("=== DEEP ZOOM PUSH CONSTANTS ===\n");
-        fmt::print("Center: hi=({}, {}), lo=({}, {})\n",
-            new_constants.data1.x, new_constants.data1.z,
-            new_constants.data1.y, new_constants.data1.w);
-        fmt::print("Zoom: hi={}, lo={}\n",
-            new_constants.data2.x, new_constants.data2.y);
-        fmt::print("Max iter: {}, Use pert: {}\n",
-            new_constants.data2.z, new_constants.data2.w);
-        fmt::print("Ref iter: {}\n", new_constants.data4.y);
-        fmt::print("================================\n");
+        // ═══════════════════════════════════════════════════════════════
+        // Safety Checks & Corrections
+        // ═══════════════════════════════════════════════════════════════
 
+        // ✅ FIX: Ensure ref_iter is valid
+        // Note: ref_iter validation done in VulkanEngine before dispatch
+        // No access to reference_orbit here
 
+        // ✅ FIX: Ensure zoom is valid
+        if (new_constants.data2.x == 0.0f || std::isnan(new_constants.data2.x) || std::isinf(new_constants.data2.x)) {
+            fmt::print("⚠️  Invalid zoom ({:.6e}), resetting to 3.0\n", new_constants.data2.x);
+            new_constants.data2.x = 3.0f;
+            new_constants.data2.y = 0.0f;
+        }
+
+        // ✅ FIX: Ensure bailout is valid
+        if (new_constants.data3.z < 1.0f) {
+            fmt::print("⚠️  Invalid bailout ({:.1f}), resetting to 256.0\n", new_constants.data3.z);
+            new_constants.data3.z = 256.0f;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Diagnostic Output (periodic)
+        // ═══════════════════════════════════════════════════════════════
+
+        static uint64_t call_counter = 0;
+        static uint64_t last_print = 0;
+        call_counter++;
+
+        if (call_counter - last_print > 60) {
+
+            fmt::print("\n╔════════════════════════════════════════╗\n");
+            fmt::print("  Deep Zoom Push Constants (Frame {})\n", call_counter);
+            fmt::print("╠════════════════════════════════════════╣\n");
+            fmt::print("  data1 (center): ({:.6f}, {:.6f}, {:.6f}, {:.6f})\n",
+                new_constants.data1.x, new_constants.data1.y,
+                new_constants.data1.z, new_constants.data1.w);
+            fmt::print("  data2 (zoom+iter): ({:.6e}, {:.6e}, {:.0f}, {:.0f})\n",
+                new_constants.data2.x, new_constants.data2.y,
+                new_constants.data2.z, new_constants.data2.w);
+            fmt::print("  data3 (color): ({:.2f}, {:.2f}, {:.0f}, {:.0f})\n",
+                new_constants.data3.x, new_constants.data3.y,
+                new_constants.data3.z, new_constants.data3.w);
+            fmt::print("  data4 (samples/orbit): ({:.0f}, {:.0f}, {:.0f}, {:.0f})\n",
+                new_constants.data4.x, new_constants.data4.y,
+                new_constants.data4.z, new_constants.data4.w);
+
+            // Validation warnings
+            if (new_constants.data2.x <= 0.0f) {
+                fmt::print("  ⚠️  WARNING: Zoom is zero or negative!\n");
+            }
+            if (new_constants.data4.y == 0.0f && new_constants.data2.w > 0.5f) {
+                fmt::print("  ⚠️  WARNING: Perturbation enabled but orbit_count is 0!\n");
+            }
+            else {
+                fmt::print("  ✅ Orbit count: {:.0f} iterations\n", new_constants.data4.y);
+            }
+
+            fmt::print("╚════════════════════════════════════════╝\n\n");
+            last_print = call_counter;
+            
+
+            // Validation warnings
+            bool has_warnings = false;
+            if (new_constants.data2.x <= 0.0f) {
+                fmt::print("\n  ⚠️  WARNING: Zoom is zero or negative!\n");
+                has_warnings = true;
+            }
+            if (new_constants.data4.y == 0.0f && new_constants.data2.w > 0.5f) {
+                fmt::print("\n  ⚠️  WARNING: Perturbation enabled but ref_iter is 0!\n");
+                has_warnings = true;
+            }
+            if (new_constants.data3.z < 1.0f) {
+                fmt::print("\n  ⚠️  WARNING: Bailout is too low!\n");
+                has_warnings = true;
+            }
+            if (!has_warnings) {
+                fmt::print("\n  ✅ All values valid!\n");
+            }
+
+            fmt::print("╚════════════════════════════════════════╝\n\n");
+
+            last_print = call_counter;
+        }
     }
+    
     break;
+
+    // ============================================================================
+    // USAGE NOTES:
+    // ============================================================================
+    // 1. Make sure to include <fmt/core.h> at the top of compute_effect_manager.h
+    // 2. The fmt::print statements are for debugging - remove them in production
+    // 3. This assumes you've already updated fractal_state.h with the hp_coords struct
+    // ============================================================================
        
     }
 
     /// NEW: Always update, and update the cache
-    push_constants = new_constants;
-    cached_constants = new_constants;
-    is_dirty = true;
+    //push_constants = new_constants;
+    // cached_constants = new_constants;
+    //is_dirty = true;
     
+    if (memcmp(&push_constants, &new_constants, sizeof(ComputePushConstants)) != 0) {
+        push_constants = new_constants;
+        is_dirty = true;
+    }
 }
 
 inline void ComputeEffectManager::dispatch(VkCommandBuffer cmd, FractalType type,

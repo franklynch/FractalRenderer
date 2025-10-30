@@ -98,6 +98,8 @@ void VulkanEngine::init()
 	deep_zoom_manager = std::make_unique<DeepZoomManager>(_device, _allocator);
 	deep_zoom_manager->initialize();  // CORRECT - using arrow operator
 
+	deep_zoom_manager->set_fractal_state(&fractal_state);
+
 	animation_system = std::make_unique<AnimationSystem>(fractal_state);
 
 	animation_renderer = std::make_unique<AnimationRenderer>(
@@ -148,56 +150,144 @@ void VulkanEngine::destroy_swapchain()
 	_renderSemaphores.clear();
 }
 
+void VulkanEngine::initialize_deep_zoom()
+{
+	if (!deep_zoom_manager) {
+		return;
+	}
+
+	// Wait for GPU
+	vkDeviceWaitIdle(_device);
+
+	// Set initial state
+	deep_zoom_manager->state.center_x = ArbitraryFloat(fractal_state.center_x);
+	deep_zoom_manager->state.center_y = ArbitraryFloat(fractal_state.center_y);
+	deep_zoom_manager->state.zoom = ArbitraryFloat(fractal_state.zoom);
+	deep_zoom_manager->state.max_iterations = fractal_state.max_iterations;
+
+	// Compute orbit
+	deep_zoom_manager->compute_reference_orbit();
+
+	// Copy to rendering buffer
+	reference_orbit.cpu_data = deep_zoom_manager->reference_orbit.cpu_data;
+
+	// ✅ NUCLEAR OPTION: Destroy old buffer and force recreation
+	if (reference_orbit.gpu_buffer.buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(_allocator, reference_orbit.gpu_buffer.buffer,
+			reference_orbit.gpu_buffer.allocation);
+		reference_orbit.gpu_buffer.buffer = VK_NULL_HANDLE;
+	}
+
+	// Create new buffer with CORRECT size
+	size_t buffer_size = reference_orbit.cpu_data.size() * sizeof(glm::vec2);
+
+	VkBufferCreateInfo bufferInfo = {};
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = buffer_size;  // ✅ ACTUAL SIZE!
+	bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+	VmaAllocationCreateInfo allocInfo = {};
+	allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+	vmaCreateBuffer(_allocator, &bufferInfo, &allocInfo,
+		&reference_orbit.gpu_buffer.buffer,
+		&reference_orbit.gpu_buffer.allocation,
+		&reference_orbit.gpu_buffer.info);
+
+	// Upload data
+	void* data;
+	vmaMapMemory(_allocator, reference_orbit.gpu_buffer.allocation, &data);
+	memcpy(data, reference_orbit.cpu_data.data(), buffer_size);
+	vmaUnmapMemory(_allocator, reference_orbit.gpu_buffer.allocation);
+
+	// Update descriptors
+	update_deep_zoom_descriptors();
+
+	// Update state
+	fractal_state.reference_iterations = static_cast<int>(reference_orbit.cpu_data.size());
+
+	fmt::print("✅ Deep Zoom initialized: {} orbit points, {} bytes\n",
+		reference_orbit.cpu_data.size(), buffer_size);
+}
+
+
+
 void VulkanEngine::prepare_deep_zoom_rendering()
 {
-	// Only process if using deep zoom fractal
 	if (current_fractal_type != FractalType::Deep_Zoom) {
 		return;
 	}
 
-	// Get current frame (this frame's resources are not in use yet)
-	FrameData& currentFrame = get_current_frame();
-
-	// Check if we need to recompute reference orbit
 	bool needs_recompute = false;
+	deep_zoom_manager->state.max_iterations = fractal_state.max_iterations;
+	bool is_animating = (deep_zoom_manager && deep_zoom_manager->state.zoom_animating);
 
-	if (fractal_state.use_perturbation) {
+	if (fractal_state.use_perturbation && !is_animating) {
 		if (fractal_state.needs_update || reference_orbit.cpu_data.empty()) {
 			needs_recompute = true;
 		}
 	}
 
 	if (needs_recompute) {
-		// Compute reference orbit at center point
+		// Wait for GPU before buffer operations
+		vkDeviceWaitIdle(_device);
+
+		// Compute new orbit
+		deep_zoom_manager->state.max_iterations = fractal_state.max_iterations;
 		deep_zoom_manager->compute_reference_orbit();
 
-		// Upload to GPU
+		// Copy and upload
+		reference_orbit.cpu_data = deep_zoom_manager->reference_orbit.cpu_data;
+		reference_orbit.is_dirty = true;  // Mark for upload
 		reference_orbit.upload_to_gpu(_device, _allocator);
 
-		// Update fractal state with actual orbit size
-		fractal_state.reference_iterations = static_cast<int>(reference_orbit.cpu_data.size());
+		// Update descriptors (waits for fences inside)
+		update_deep_zoom_descriptors();
 
-		if (reference_orbit.cpu_data.size() > 0) {
-			fmt::print("Reference orbit: {} points\n",
-				reference_orbit.cpu_data.size());
-		}
+		// Update state
+		fractal_state.reference_iterations = static_cast<int>(reference_orbit.cpu_data.size());
+		fractal_state.clear_dirty();
+	}
+}
+
+void VulkanEngine::update_deep_zoom_descriptors()
+{
+	fmt::print("\n🔍 update_deep_zoom_descriptors() called\n");
+	fmt::print("  Orbit CPU size: {} elements\n", reference_orbit.cpu_data.size());
+
+	// ✅ Just verify buffer exists
+	if (reference_orbit.gpu_buffer.buffer == VK_NULL_HANDLE) {
+		fmt::print("  ❌ ERROR: No GPU buffer exists!\n");
+		return;
 	}
 
-	// ✅ UPDATE THIS FRAME'S DESCRIPTOR SET
-	// This is safe because this frame hasn't been submitted yet!
-	DescriptorWriter writer;
+	// Wait for GPU
+//	for (int i = 0; i < FRAME_OVERLAP; i++) {
+//		vkWaitForFences(_device, 1, &_frames[i]._renderFence, VK_TRUE, UINT64_MAX);
+//	}
 
-	// Binding 0: Storage Image
-	writer.write_image(0, _drawImage.imageView, VK_NULL_HANDLE,
-		VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+	fmt::print("  📝 Updating descriptors\n");
 
-	// Binding 1: Storage Buffer (reference orbit)
-	writer.write_buffer(1, reference_orbit.gpu_buffer.buffer,
-		VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	// ✅ Update descriptor sets with existing buffer
+	for (int i = 0; i < FRAME_OVERLAP; i++) {
+		DescriptorWriter writer;
 
-	// Update THIS FRAME'S descriptor set
-	writer.update_set(_device, currentFrame._deepZoomDescriptorSet);
+		writer.write_image(0, _drawImage.imageView, VK_NULL_HANDLE,
+			VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+
+		// Use VK_WHOLE_SIZE - let Vulkan use the entire buffer
+		writer.write_buffer(1, reference_orbit.gpu_buffer.buffer,
+			VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+		writer.update_set(_device, _frames[i]._deepZoomDescriptorSet);
+	}
+
+	fmt::print("  ✅ Descriptors updated for {} frames\n", FRAME_OVERLAP);
+	fmt::print("╚════════════════════════════════════════╝\n\n");
 }
+
+
+
 
 
 void VulkanEngine::cleanup()
@@ -240,22 +330,77 @@ void VulkanEngine::cleanup()
 
 void VulkanEngine::draw_background(VkCommandBuffer cmd)
 {
-	if (_drawExtent.width == 0 || _drawExtent.height == 0) {
-		fmt::print("Warning: Invalid draw extent in draw_background\n");
-		return;
-	}
+	
+	
 
-	// NEW: Use compute_manager instead of manual pipeline management
-	float time = static_cast<float>(ImGui::GetTime());
+		float time = static_cast<float>(ImGui::GetTime());
 
-	// ✅ GET CURRENT FRAME
+	
 	FrameData& currentFrame = get_current_frame();
 
-	// ✅ SELECT CORRECT DESCRIPTOR SET
-	// Use the current frame's deep zoom descriptor (safe - not in use yet)
+	int current_frame_idx = _frameNumber % FRAME_OVERLAP;
+
 	VkDescriptorSet descriptor_set = (current_fractal_type == FractalType::Deep_Zoom)
-		? currentFrame._deepZoomDescriptorSet  // Per-frame descriptor
+		? currentFrame._deepZoomDescriptorSet
 		: _drawImageDescriptors;
+
+	// ═══════════════════════════════════════════════════════════════
+	// 🔍 DIAGNOSTIC: Log rendering details
+	// ═══════════════════════════════════════════════════════════════
+	static uint64_t last_draw_log = 0;
+	// bool should_log = (_frameNumber - last_draw_log) > 60 &&
+	//	current_fractal_type == FractalType::Deep_Zoom;
+
+	bool should_log = false;
+
+	if (should_log) {
+		fmt::print("\n╔════════════════════════════════════════════╗\n");
+		fmt::print("║ Frame {:6} - draw_background()        ║\n", _frameNumber);
+		fmt::print("╚════════════════════════════════════════════╝\n");
+		fmt::print("  Frame index: {}/{}\n", current_frame_idx, FRAME_OVERLAP);
+		fmt::print("  Descriptor set: {:p}\n", (void*)descriptor_set);
+		fmt::print("  Draw image: {:p}\n", (void*)_drawImage.imageView);
+		fmt::print("  Draw extent: {}x{}\n", _drawExtent.width, _drawExtent.height);
+		fmt::print("  Image layout: {}\n", (int)_drawImageLayout);
+
+		// Check if descriptor is valid
+		if (descriptor_set == VK_NULL_HANDLE) {
+			fmt::print("  ⚠️⚠️⚠️ DESCRIPTOR SET IS NULL! ⚠️⚠️⚠️\n");
+		}
+
+		// Check if image is valid
+		if (_drawImage.imageView == VK_NULL_HANDLE) {
+			fmt::print("  ⚠️⚠️⚠️ IMAGE VIEW IS NULL! ⚠️⚠️⚠️\n");
+		}
+
+		// Verify image layout is correct (should be GENERAL for compute)
+		if (_drawImageLayout != VK_IMAGE_LAYOUT_GENERAL) {
+			fmt::print("  ⚠️ WARNING: Image layout is {} (expected {}=GENERAL)\n",
+				(int)_drawImageLayout, (int)VK_IMAGE_LAYOUT_GENERAL);
+		}
+
+		fmt::print("╚════════════════════════════════════════════╝\n\n");
+		last_draw_log = _frameNumber;
+	}
+
+
+	if (current_fractal_type == FractalType::Deep_Zoom) {
+		
+		fractal_state.reference_iterations = static_cast<int>(reference_orbit.cpu_data.size());
+	}
+
+	if (current_fractal_type == FractalType::Deep_Zoom) {
+		fmt::print("  🔧 Dispatching deep zoom compute shader...\n");
+		fmt::print("     - Orbit points: {}\n", reference_orbit.cpu_data.size());
+		fmt::print("     - Center: ({}, {})\n",
+			deep_zoom_manager->state.center_x.to_double(),
+			deep_zoom_manager->state.center_y.to_double());
+		fmt::print("     - Zoom: {}\n", deep_zoom_manager->state.zoom.to_double());
+
+		// Dispatch compute shader here...
+
+		fmt::print("  ✅ Deep zoom compute dispatched\n");
+	}
 
 	compute_manager->dispatch(
 		cmd,
@@ -268,6 +413,8 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
 
 	// Clear dirty flag after rendering
 	fractal_state.clear_dirty();
+
+	
 }
 
 void VulkanEngine::verify_push_constant_layout()
@@ -391,6 +538,24 @@ void VulkanEngine::draw()
 
 		prepare_deep_zoom_rendering();
 
+		static uint64_t last_layout_log = 0;
+		// bool should_log_layout = (_frameNumber - last_layout_log) > 60 &&
+		//	current_fractal_type == FractalType::Deep_Zoom;
+
+		bool should_log_layout = false;
+
+		if (should_log_layout) {
+			fmt::print("[Frame {}] Before draw_background:\n", _frameNumber);
+			fmt::print("  Current layout: {}\n", (int)_drawImageLayout);
+			fmt::print("  Image: {:p}\n", (void*)_drawImage.imageView);
+			last_layout_log = _frameNumber;
+		}
+
+
+		_drawExtent.width = _drawImage.imageExtent.width;
+		_drawExtent.height = _drawImage.imageExtent.height;
+
+		
 
 	draw_background(cmd);  // Now _drawExtent is valid
 
@@ -493,7 +658,7 @@ void VulkanEngine::run()
 				fractal_state.center_y = deep_zoom_manager->state.center_y.to_double();
 				fractal_state.zoom = deep_zoom_manager->state.zoom.to_double();
 				fractal_state.max_iterations = deep_zoom_manager->state.reference_iterations;
-				fractal_state.mark_dirty();
+			//	fractal_state.mark_dirty();
 			}
 		}
 
@@ -701,6 +866,9 @@ void VulkanEngine::setup_callbacks()
 		fmt::print("Fractal type changed to: {}\n",
 			FractalState::get_name(new_type));
 
+		if (current_fractal_type == FractalType::Deep_Zoom) {
+			initialize_deep_zoom();
+		}
 
 		// NEW: Initialize deep zoom state when switching to it
 		if (new_type == FractalType::Deep_Zoom && deep_zoom_manager) {
@@ -718,15 +886,23 @@ void VulkanEngine::setup_callbacks()
 			fractal_state.use_perturbation = should_use_perturbation;
 
 			if (should_use_perturbation) {
-				fmt::print("  Perturbation enabled (zoom < 1e-9)\n");
-				deep_zoom_manager->compute_reference_orbit();
+				fmt::print("  Perturbation enabled (zoom < 1e-6)\n");
 			}
 			else {
-				fmt::print("  Using high-precision mode (zoom >= 1e-9)\n");
+				fmt::print("  Using high-precision mode (zoom >= 1e-6)\n");
 			}
 
-			// Compute initial reference orbit
+			// ✅ Compute reference orbit ONCE
+			deep_zoom_manager->state.max_iterations = fractal_state.max_iterations;
 			deep_zoom_manager->compute_reference_orbit();
+
+			// ✅ CRITICAL: Copy CPU data from deep_zoom_manager to reference_orbit
+			reference_orbit.cpu_data = deep_zoom_manager->reference_orbit.cpu_data;
+
+			// ✅ Upload to GPU and update descriptors
+			reference_orbit.is_dirty = true;
+			reference_orbit.upload_to_gpu(_device, _allocator);
+			update_deep_zoom_descriptors();
 
 			fmt::print("  Center: ({}, {})\n",
 				fractal_state.center_x, fractal_state.center_y);
@@ -748,9 +924,6 @@ void VulkanEngine::setup_callbacks()
 		}
 
 		current_fractal_type = new_type;
-		
-
-
 		};
 
 	ui_manager->on_apply_preset = [this](const Preset& preset) {
@@ -780,56 +953,58 @@ auto deep_zoom_preset_cb = [this](int preset_index) {
             "Deep zoom only works with Mandelbrot Deep Zoom fractal!",
             ImVec4(1, 0.5, 0, 1)
         );
+
         return;
     }
     
-    // Use the preset_index parameter to select which preset
-    ZoomKeyframe kf;
-    
-    switch (preset_index) {
-        case 0:  // Seahorse Valley
-            kf = DeepZoomPresets::createSeahorseZoom();
-            break;
-        case 1:  // Elephant Valley
-            kf = DeepZoomPresets::createElephantZoom();
-            break;
-        case 2:  // Mini Mandelbrot
-            kf = DeepZoomPresets::createMiniMandelbrotZoom();
-            break;
-        default:
-            return;  // Invalid index
-    }
-    
-    // Apply the preset
-    deep_zoom_manager->state.center_x = kf.center_x;
-    deep_zoom_manager->state.center_y = kf.center_y;
-    deep_zoom_manager->state.zoom = kf.zoom;
-	
-	// CRITICAL: Enable perturbation for deep zoom presets
-	bool needs_perturbation = (kf.zoom.to_double() < 1e-9);
-	deep_zoom_manager->state.use_perturbation = needs_perturbation;
-	fractal_state.use_perturbation = needs_perturbation;
-
-	// Compute reference orbit (will work now that perturbation is enabled)
-	if (needs_perturbation) {
-		deep_zoom_manager->compute_reference_orbit();
-		fmt::print("Reference orbit computed: {} points\n",
-			reference_orbit.cpu_data.size());
+	// Select preset
+	ZoomKeyframe kf;
+	switch (preset_index) {
+	case 0: kf = DeepZoomPresets::createSeahorseZoom(); break;
+	case 1: kf = DeepZoomPresets::createElephantZoom(); break;
+	case 2: kf = DeepZoomPresets::createMiniMandelbrotZoom(); break;
+	default: return;
 	}
 
+	// Apply preset to deep zoom manager
+	deep_zoom_manager->state.center_x = kf.center_x;
+	deep_zoom_manager->state.center_y = kf.center_y;
+	deep_zoom_manager->state.zoom = kf.zoom;
+	deep_zoom_manager->state.max_iterations = fractal_state.max_iterations;
+	deep_zoom_manager->state.use_perturbation = true;
+	fractal_state.use_perturbation = true;
 
-    
-    
+	// Compute reference orbit
+	deep_zoom_manager->compute_reference_orbit();
+
+	// ✅ CRITICAL: Copy CPU data
+	reference_orbit.cpu_data = deep_zoom_manager->reference_orbit.cpu_data;
+
+	// ✅ Upload and update descriptors
+	reference_orbit.is_dirty = true;
+	reference_orbit.upload_to_gpu(_device, _allocator);
+	update_deep_zoom_descriptors();
+
+	// ✅ NEW: Update state with actual orbit count for shader!
+	fractal_state.reference_iterations = static_cast<int>(reference_orbit.cpu_data.size());
+
+	fmt::print("Reference orbit computed: {} points\n",
+		deep_zoom_manager->reference_orbit.cpu_data.size());
+
+	// Sync coordinates to fractal state
 	fractal_state.center_x = deep_zoom_manager->state.center_x.to_double();
 	fractal_state.center_y = deep_zoom_manager->state.center_y.to_double();
 	fractal_state.zoom = deep_zoom_manager->state.zoom.to_double();
-	// fractal_state.max_iterations = deep_zoom_manager->state.max_iterations;
 	fractal_state.mark_dirty();
 
-	fmt::print("Jumped to preset {} - Center: ({:.15f}, {:.15f}), Zoom: {:.2e}\n",
-		preset_index, fractal_state.center_x, fractal_state.center_y,
+	fmt::print("Jumped to preset {} - Center: ({}, {}), Zoom: {:.2e}\n",
+		preset_index,
+		fractal_state.center_x,
+		fractal_state.center_y,
 		fractal_state.zoom);
-};
+	};
+
+
 
 	// Assign to both input handler and UI manager
 	input_handler->on_deep_zoom_preset = deep_zoom_preset_cb;
@@ -850,7 +1025,9 @@ auto deep_zoom_preset_cb = [this](int preset_index) {
 			fractal_state.use_perturbation = needs_perturbation;
 
 			if (needs_perturbation) {
+				deep_zoom_manager->state.max_iterations = fractal_state.max_iterations;
 				deep_zoom_manager->compute_reference_orbit();
+				update_deep_zoom_descriptors();
 			}
 
 			// CRITICAL: Sync back to fractal_state
@@ -2221,44 +2398,6 @@ void VulkanEngine::init_descriptors()
 }
 
 
-
-void VulkanEngine::update_deep_zoom_descriptors()
-{
-	// Only update if we have a valid buffer
-	if (reference_orbit.gpu_buffer.buffer == VK_NULL_HANDLE) {
-		// Create a dummy buffer for initial descriptor write
-		// This prevents validation errors when switching to deep zoom mode
-		VkBufferCreateInfo bufferInfo = {};
-		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bufferInfo.size = sizeof(glm::vec2) * 16;  // Minimal size
-		bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-
-		VmaAllocationCreateInfo allocInfo = {};
-		allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-
-		vmaCreateBuffer(_allocator, &bufferInfo, &allocInfo,
-			&reference_orbit.gpu_buffer.buffer,
-			&reference_orbit.gpu_buffer.allocation,
-			&reference_orbit.gpu_buffer.info);
-	}
-
-	for (int i = 0; i < FRAME_OVERLAP; i++) {
-		DescriptorWriter writer;
-
-		// Binding 0: Storage Image
-		writer.write_image(0, _drawImage.imageView, VK_NULL_HANDLE,
-			VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-
-		// Binding 1: Storage Buffer (reference orbit)
-		writer.write_buffer(1, reference_orbit.gpu_buffer.buffer,
-			VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-
-		writer.update_set(_device, _frames[i]._deepZoomDescriptorSet);
-	}
-
-	fmt::print("Initialized all {} deep zoom descriptor sets\n", FRAME_OVERLAP);
-
-}
 
 void VulkanEngine::init_pipelines()
 {

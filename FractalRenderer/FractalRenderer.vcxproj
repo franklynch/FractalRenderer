@@ -108,6 +108,7 @@ fmt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     <ClInclude Include="src\compute_effect_manager.h" />
     <ClInclude Include="src\deep_zoom_system.h" />
     <ClInclude Include="src\fractal_state.h" />
+    <ClInclude Include="src\high_precision_math.h" />
     <ClInclude Include="src\input_handler.h" />
     <ClInclude Include="src\ui_manager.h" />
     <ClInclude Include="src\video_encoder.h" />

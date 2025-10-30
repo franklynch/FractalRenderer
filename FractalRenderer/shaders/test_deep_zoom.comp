@@ -1,0 +1,207 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(std430, set = 0, binding = 1) readonly buffer ReferenceOrbit {
+    vec2 reference_orbit[]; // stored as float complex z_ref = (x,y)
+};
+
+layout(push_constant) uniform constants {
+    vec4 data1;  // center_x_hi, center_x_lo, center_y_hi, center_y_lo
+    vec4 data2;  // zoom_hi, zoom_lo, max_iterations, use_perturbation
+    vec4 data3;  // color_offset, color_scale, bailout, palette_mode
+    vec4 data4;  // samples_per_pixel, reference_iterations, use_series_approx, series_order
+    vec4 data5;  // reserved
+} push;
+
+// -------------------- Double-Double helpers --------------------
+
+vec2 dd_add_sf(vec2 a, float b) {
+    // keep original signature for compatibility (a + b)
+    float t1 = a.x + b;
+    float e = t1 - a.x;
+    float t2 = ((b - e) + (a.x - (t1 - e))) + a.y;
+    float hi = t1 + t2;
+    float lo = t2 - (hi - t1);
+    return vec2(hi, lo);
+}
+
+vec2 dd_add_dd(vec2 a, vec2 b) {
+    // add two double-double numbers a and b
+    float s = a.x + b.x;
+    float v = s - a.x;
+    float t = ((b.x - v) + (a.x - (s - v))) + (a.y + b.y);
+    float hi = s + t;
+    float lo = t - (hi - s);
+    return vec2(hi, lo);
+}
+
+vec2 dd_mul_sf(vec2 a, float b) {
+    float p = a.x * b;
+    float e = fma(a.x, b, -p);
+    float lo = fma(a.y, b, e);
+    float hi = p + lo;
+    lo = lo - (hi - p);
+    return vec2(hi, lo);
+}
+
+float dd_to_float(vec2 a) {
+    return a.x + a.y;
+}
+
+// -------------------- Complex helpers --------------------
+
+vec2 c_add(vec2 a, vec2 b) { return a + b; }
+vec2 c_mul(vec2 a, vec2 b) {
+    // complex multiply (a.x + i a.y) * (b.x + i b.y)
+    return vec2(a.x * b.x - a.y * b.y,
+                a.x * b.y + a.y * b.x);
+}
+vec2 c_mul_scalar(vec2 a, float s) { return a * s; }
+
+// -------------------- HSV -> RGB --------------------
+
+vec3 hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// -------------------- Smooth coloring --------------------
+
+vec3 get_color(float iter, float max_iter, vec2 z) {
+    if (iter >= max_iter - 0.5) {
+        return vec3(0.0); // inside (black)
+    }
+
+    float lenz = length(z);
+    lenz = max(lenz, 1e-12); // avoid log(0)
+    float log_zn = log(lenz);
+    float nu = log(log_zn / log(2.0)) / log(2.0);
+    float smooth_iter = iter + 1.0 - nu;
+
+    float t = smooth_iter * push.data3.y + push.data3.x;
+    int palette = int(push.data3.w);
+    vec3 color;
+
+    if (palette == 0) {
+        float hue = fract(t * 0.05);
+        color = hsv2rgb(vec3(hue, 0.8, 0.9));
+    } else if (palette == 1) {
+        float s = fract(t * 0.03);
+        color = mix(vec3(0.0, 0.1, 0.3), vec3(1.0), s);
+    } else if (palette == 2) {
+        float s = fract(t * 0.04);
+        color = mix(vec3(0.1, 0.0, 0.0), vec3(1.0, 0.8, 0.0), s);
+    } else {
+        float s = fract(t * 0.02);
+        color = vec3(s);
+    }
+
+    return color;
+}
+
+// -------------------- Main --------------------
+
+void main() {
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(image);
+    if (texelCoord.x >= size.x || texelCoord.y >= size.y) return;
+
+    int max_iter = int(push.data2.z);
+    int ref_iter = int(push.data4.y);
+    float bailout = max(2.0, push.data3.z); // use provided bailout but no less than 2
+    float bailout_sq = bailout * bailout;
+
+    // normalized uv
+    vec2 uv = vec2(texelCoord) / vec2(size);
+
+    // read dd center + zoom
+    vec2 center_x = push.data1.xy; // dd
+    vec2 center_y = push.data1.zw; // dd
+    vec2 zoom = push.data2.xy;     // dd
+
+    float aspect = float(size.x) / float(size.y);
+
+    // pixel_size = zoom * (4.0 / height) as dd
+    vec2 pixel_size = dd_mul_sf(zoom, 4.0 / float(size.y));
+
+    // offset in screen (float)
+    float offset_x = (uv.x - 0.5) * aspect;
+    float offset_y = (uv.y - 0.5);
+
+    // delta as double-double
+    vec2 dc_x = dd_mul_sf(pixel_size, offset_x);
+    vec2 dc_y = dd_mul_sf(pixel_size, offset_y);
+
+    // compose c as dd components and only convert to float at the end
+    vec2 c_x_dd = dd_add_dd(center_x, dc_x);
+    vec2 c_y_dd = dd_add_dd(center_y, dc_y);
+
+    // delta for perturbation (converted to float deltas)
+    vec2 delta = vec2(dd_to_float(dc_x), dd_to_float(dc_y));
+
+    // Prepare dz (perturbation) in float complex
+    vec2 dz = vec2(0.0);
+
+    // Safety: ensure we don't index past buffer length.
+    // We don't have a built-in length; assume caller provides proper ref_iter.
+    // (If you can, pass buffer length or clamp ref_iter appropriately in host code.)
+
+    // Iterate using reference orbit and perturbation
+    for (int i = 0; i < min(max_iter, ref_iter); ++i) {
+        vec2 z_ref = reference_orbit[i]; // float complex
+
+        // term1 = 2 * z_ref * dz (complex multiply)
+        vec2 term1 = c_mul_scalar(c_mul(z_ref, dz), 2.0);
+
+        // term2 = dz^2 (complex square)
+        vec2 term2 = vec2(dz.x * dz.x - dz.y * dz.y,
+                          2.0 * dz.x * dz.y);
+
+        dz = term1 + term2 + delta;
+
+        vec2 z_full = c_add(z_ref, dz);
+        float z_mag_sq = dot(z_full, z_full);
+
+        if (z_mag_sq > bailout_sq) {
+            vec3 color = get_color(float(i), float(max_iter), z_full);
+            imageStore(image, texelCoord, vec4(color, 1.0));
+            return;
+        }
+    }
+
+    // If we reached here, we didn't escape during the perturbed reference orbit.
+    // Two choices:
+    //  1) declare inside set (black)
+    //  2) continue iterating (float) from the last known z_ref + dz for remaining iterations.
+    // We'll continue in float for remaining iterations to attempt escape check.
+
+    vec2 z = vec2(0.0);
+    if (ref_iter > 0) {
+        // start from reference_orbit[ref_iter-1] + dz (dz currently is delta advanced ref_iter times)
+        z = c_add(reference_orbit[min(ref_iter - 1, int(ref_iter) - 1)], dz);
+    } else {
+        // no reference orbit available, start from c
+        z = vec2(dd_to_float(c_x_dd), dd_to_float(c_y_dd));
+    }
+
+    for (int i = min(max_iter, ref_iter); i < max_iter; ++i) {
+        // z = z^2 + c
+        vec2 z2 = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y);
+
+        vec2 c_float = vec2(dd_to_float(c_x_dd), dd_to_float(c_y_dd));
+        z = z2 + c_float;
+
+        float zmag2 = dot(z, z);
+        if (zmag2 > bailout_sq) {
+            vec3 color = get_color(float(i), float(max_iter), z);
+            imageStore(image, texelCoord, vec4(color, 1.0));
+            return;
+        }
+    }
+
+    // likely inside set
+    imageStore(image, texelCoord, vec4(0.0, 0.0, 0.0, 1.0));
+}
